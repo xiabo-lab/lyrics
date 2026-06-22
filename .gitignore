@@ -1,0 +1,17 @@
+ # Python
+  __pycache__/
+  *.py[cod]
+
+  # Runtime data (generated on the Pi, not source)
+  cache/
+  rejections.json
+
+  # Local Claude Code settings
+  .claude/
+
+  # Editor / OS noise
+  .vscode/
+  .idea/
+  *.swp
+  .DS_Store
+  Thumbs.db
