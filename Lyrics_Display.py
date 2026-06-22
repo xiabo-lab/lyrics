@@ -63,7 +63,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.2"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -111,6 +111,8 @@ LINE_GAP_PAD = 70   # extra px between stacked lines, on top of font half-height
 TARGET_FPS = 30
 INTRO_DOTS_MAX = 3   # pre-song countdown: max dots shown (1 dot = 1 second)
 CURRENT_BOLD = True       # render the current line bold for glance legibility
+TOP_BOLD = False          # render the top (previous) context line bold
+BOTTOM_BOLD = False       # render the bottom (next) context line bold
 SHOW_PREV_LINE = True     # False = less-cluttered current+next-only view
 PROGRESS_BAR = True       # thin bar under the current line tracking progress
 DIM_ENABLED = True        # auto-dim the whole display at night
@@ -204,6 +206,8 @@ _CONFIG_DEFAULTS = {
     "intro_dots_max": INTRO_DOTS_MAX,
     "target_fps": TARGET_FPS,
     "current_bold": CURRENT_BOLD,
+    "top_bold": TOP_BOLD,
+    "bottom_bold": BOTTOM_BOLD,
     "show_prev_line": SHOW_PREV_LINE,
     "progress_bar": PROGRESS_BAR,
     "dim_enabled": DIM_ENABLED,
@@ -275,6 +279,7 @@ def apply_config() -> None:
     global LATENCY_OFFSET_MS, LEAD_OFFSET_MS, FONT_CURRENT, FONT_TOP, FONT_BOTTOM
     global FONT_SYNC, CURRENT, PREV, NEXT
     global LINE_GAP_PAD, INTRO_DOTS_MAX, TARGET_FPS, CURRENT_BOLD, SHOW_PREV_LINE
+    global TOP_BOLD, BOTTOM_BOLD
     global PROGRESS_BAR, DIM_ENABLED, DAY_START_HOUR, NIGHT_START_HOUR
     global NIGHT_BRIGHTNESS, MAX_LINE_WIDTH_FRAC, AUTOCONNECT, FLIP_180
     cfg = load_config()
@@ -291,6 +296,8 @@ def apply_config() -> None:
     INTRO_DOTS_MAX = cfg["intro_dots_max"]
     TARGET_FPS = cfg["target_fps"]
     CURRENT_BOLD = cfg["current_bold"]
+    TOP_BOLD = cfg["top_bold"]
+    BOTTOM_BOLD = cfg["bottom_bold"]
     SHOW_PREV_LINE = cfg["show_prev_line"]
     PROGRESS_BAR = cfg["progress_bar"]
     DIM_ENABLED = cfg["dim_enabled"]
@@ -1462,9 +1469,10 @@ def _settings_layout(w: int, h: int):
 
     Pure geometry only — no live values — so the draw pass and the touch
     hit-test share one source of truth for where every control sits. Returns
-    (sliders, swatches, done) where:
+    (sliders, swatches, bolds, done) where:
       sliders  = {key: Rect}                       — the size-slider track
       swatches = {key: [(name, rgb, Rect), ...]}   — six colour squares
+      bolds    = {key: Rect}                        — the Bold/Normal toggle
       done     = Rect                              — the Done/save button
     """
     margin_x = max(20, int(w * 0.08))
@@ -1474,40 +1482,63 @@ def _settings_layout(w: int, h: int):
     bottom_pad = int(h * 0.03)
     avail = h - top - done_h - bottom_pad
     sec_h = max(60, avail // len(SETTINGS_ROWS))
-    sw = max(24, min(int(sec_h * 0.34), content_w // 8))
-    gap = (content_w - 6 * sw) // 5 if content_w > 6 * sw else 6
 
-    sliders, swatches = {}, {}
+    # Each section is split horizontally: the LEFT 3/5 holds the size slider +
+    # colour swatches, the RIGHT 2/5 is a big Bold/Normal button. Keeping them
+    # in separate columns means the slider's wide (vertically generous) hit zone
+    # can never swallow a tap meant for the Bold button.
+    col_gap = max(16, int(content_w * 0.03))
+    left_w = int(content_w * 0.60)
+    right_x = margin_x + left_w + col_gap
+    right_w = content_w - left_w - col_gap
+    sw = max(22, min(int(sec_h * 0.34), left_w // 8))
+    gap = (left_w - 6 * sw) // 5 if left_w > 6 * sw else 6
+
+    sliders, swatches, bolds = {}, {}, {}
     for i, (key, _label) in enumerate(SETTINGS_ROWS):
         sec_y = top + i * sec_h
         slider_y = sec_y + int(sec_h * 0.34)
         slider_h = max(10, int(sec_h * 0.09))
-        sliders[key] = pygame.Rect(margin_x, slider_y, content_w, slider_h)
+        sliders[key] = pygame.Rect(margin_x, slider_y, left_w, slider_h)
         sw_y = sec_y + int(sec_h * 0.58)
         rects = []
         for j, (name, rgb) in enumerate(SETTING_COLORS):
             x = margin_x + j * (sw + gap)
             rects.append((name, rgb, pygame.Rect(x, sw_y, sw, sw)))
         swatches[key] = rects
+        # Big Bold/Normal button filling the right column.
+        bolds[key] = pygame.Rect(right_x, sec_y + int(sec_h * 0.12),
+                                 right_w, int(sec_h * 0.68))
     done_w = max(140, int(w * 0.30))
     done = pygame.Rect(w // 2 - done_w // 2, top + len(SETTINGS_ROWS) * sec_h,
                        done_w, done_h)
-    return sliders, swatches, done
+    return sliders, swatches, bolds, done
 
 
-def draw_settings(screen, w, h, sizes: dict, names: dict) -> None:
-    """Render the settings panel: a size slider + 6-colour palette per line,
-    plus a Done button. `sizes` maps key→font px, `names` maps key→colour name
-    (lowercased). Drawn before the FLIP_180 flip so it rides the same
-    orientation correction as everything else."""
+def draw_settings(screen, w, h, sizes: dict, names: dict, bolds: dict) -> None:
+    """Render the settings panel: a size slider + 6-colour palette + Bold/Normal
+    toggle per line, plus a Done button. `sizes` maps key→font px, `names` maps
+    key→colour name (lowercased), `bolds` maps key→bool. Drawn before the
+    FLIP_180 flip so it rides the same orientation correction as everything
+    else."""
     screen.fill(BG)
-    sliders, swatches, done = _settings_layout(w, h)
+    sliders, swatches, bold_rects, done = _settings_layout(w, h)
     label_font = get_font(max(20, min(40, h // 22)), True)
     for key, label in SETTINGS_ROWS:
         rect = sliders[key]
         size = sizes[key]
         lbl = label_font.render(f"{label} — {size}px", True, (235, 235, 235))
         screen.blit(lbl, (rect.x, rect.y - lbl.get_height() - 8))
+        # Big Bold/Normal toggle on the right: filled blue when bold, dim grey
+        # when normal. Font scales with the button so it reads at a glance.
+        brect = bold_rects[key]
+        is_bold = bolds.get(key, False)
+        pygame.draw.rect(screen, (40, 90, 140) if is_bold else (60, 60, 68),
+                         brect, border_radius=12)
+        bold_font = get_font(max(18, min(48, brect.height // 2)), True)
+        bsurf = bold_font.render("Bold" if is_bold else "Normal", True,
+                                 (255, 255, 255) if is_bold else (205, 205, 205))
+        screen.blit(bsurf, bsurf.get_rect(center=brect.center))
         # Slider track + filled portion + knob.
         radius = max(2, rect.h // 2)
         pygame.draw.rect(screen, (70, 70, 70), rect, border_radius=radius)
@@ -1609,6 +1640,12 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     #   "version"    → read-only build info
     menu_screen: str | None = None
     settings_armed = False       # ignore touches until the opening hold lifts
+    # A touch fires BOTH a FINGERDOWN and a synthesized MOUSEBUTTONDOWN; without
+    # debouncing, every menu tap is handled twice — harmless for sliders/swatches
+    # (idempotent) but it double-toggles the Bold buttons (net no-op) and would
+    # arm+confirm the firmware update in one tap. Ignore a second tap within this
+    # window. Drags (FINGERMOTION) are NOT gated by this.
+    last_menu_tap = 0.0
     # Selected colour name per line, for the swatch highlight + save. Refreshed
     # from the live colours each time the panel opens.
     set_color_names = {"current": color_name_of(CURRENT),
@@ -1655,9 +1692,11 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         return {"current": FONT_CURRENT, "top": FONT_TOP, "bottom": FONT_BOTTOM}
 
     def _apply_settings_size(key: str, size) -> None:
-        """Live-preview a font-size slider drag (no file write until Done)."""
+        """Live-preview a font-size slider drag (no file write until Done).
+        Snaps to 5px steps so the slider lands on round sizes."""
         nonlocal prev_pos, curr_pos, next_pos
         global FONT_CURRENT, FONT_TOP, FONT_BOTTOM
+        size = int(round(size / 5.0)) * 5
         size = int(min(SETTINGS_FONT_MAX, max(SETTINGS_FONT_MIN, size)))
         if key == "current":
             FONT_CURRENT = size
@@ -1678,6 +1717,19 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         else:
             NEXT = rgb
         set_color_names[key] = name
+
+    def _settings_bolds() -> dict:
+        return {"current": CURRENT_BOLD, "top": TOP_BOLD, "bottom": BOTTOM_BOLD}
+
+    def _apply_settings_bold(key: str) -> None:
+        """Flip a line's Bold/Normal state (no file write until Done)."""
+        global CURRENT_BOLD, TOP_BOLD, BOTTOM_BOLD
+        if key == "current":
+            CURRENT_BOLD = not CURRENT_BOLD
+        elif key == "top":
+            TOP_BOLD = not TOP_BOLD
+        else:
+            BOTTOM_BOLD = not BOTTOM_BOLD
 
     def open_menu() -> None:
         """Long-press landed: show the top-level menu."""
@@ -1700,19 +1752,32 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 "current_color": set_color_names["current"],
                 "top_color": set_color_names["top"],
                 "bottom_color": set_color_names["bottom"],
+                "current_bold": CURRENT_BOLD,
+                "top_bold": TOP_BOLD,
+                "bottom_bold": BOTTOM_BOLD,
             })
             last_cfg_mtime = _cfg_mtime()
             print(f"[settings] saved fonts={FONT_CURRENT}/{FONT_TOP}/{FONT_BOTTOM}"
                   f" colours={set_color_names['current']}/{set_color_names['top']}"
-                  f"/{set_color_names['bottom']}")
+                  f"/{set_color_names['bottom']}"
+                  f" bold={TOP_BOLD}/{CURRENT_BOLD}/{BOTTOM_BOLD}")
         except Exception as e:
             print(f"[settings] save failed: {e}")
         menu_screen = "main"
 
     def settings_touch(lx: float, ly: float, motion: bool) -> None:
         """Route a logical-coord touch on the font panel to a slider
-        (drag-or-tap), a colour swatch (tap), or the Done button (tap)."""
-        sliders, swatches, done = _settings_layout(w, h)
+        (drag-or-tap), a colour swatch (tap), a Bold/Normal toggle (tap), or the
+        Done button (tap)."""
+        sliders, swatches, bold_rects, done = _settings_layout(w, h)
+        # Bold toggles are tap-only and take priority over the slider's wide hit
+        # zone (they're in a separate right-hand column, but check first so a tap
+        # there can never be stolen by the slider).
+        if not motion:
+            for key, brect in bold_rects.items():
+                if brect.collidepoint(lx, ly):
+                    _apply_settings_bold(key)
+                    return
         for key, rect in sliders.items():
             # Thin track → generous vertical hit zone so it's easy to grab.
             if rect.inflate(0, max(40, rect.h * 4)).collidepoint(lx, ly):
@@ -1736,7 +1801,14 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         """Dispatch a logical-coord touch to whichever menu screen is showing.
         Only the font panel cares about motion (slider drags); the others are
         tap-only. Bluetooth actions are async, so they're fired as tasks."""
-        nonlocal menu_screen
+        nonlocal menu_screen, last_menu_tap
+        # Debounce discrete taps so the FINGERDOWN + synthesized MOUSEBUTTONDOWN
+        # pair counts once (drags pass through — they must stay responsive).
+        if not motion:
+            now_t = time.monotonic()
+            if now_t - last_menu_tap < 0.35:
+                return
+            last_menu_tap = now_t
         if menu_screen == "font":
             settings_touch(lx, ly, motion)
             return
@@ -1899,7 +1971,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     print(f"[config] reloaded: lead={LEAD_OFFSET_MS}ms "
                           f"latency={LATENCY_OFFSET_MS}ms "
                           f"fonts={FONT_CURRENT}/{FONT_TOP}/{FONT_BOTTOM} "
-                          f"bold={CURRENT_BOLD} prev={SHOW_PREV_LINE} "
+                          f"bold={TOP_BOLD}/{CURRENT_BOLD}/{BOTTOM_BOLD} "
+                          f"prev={SHOW_PREV_LINE} "
                           f"bar={PROGRESS_BAR} dim={DIM_ENABLED} "
                           f"dots={INTRO_DOTS_MAX} fps={TARGET_FPS}")
 
@@ -1909,7 +1982,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 draw_main_menu(screen, w, h)
             elif menu_screen == "font":
                 # Font panel replaces the lyric frame entirely.
-                draw_settings(screen, w, h, _settings_sizes(), set_color_names)
+                draw_settings(screen, w, h, _settings_sizes(), set_color_names,
+                              _settings_bolds())
             elif menu_screen == "bluetooth":
                 draw_bluetooth(screen, w, h, bt)
             elif menu_screen == "version":
@@ -1947,14 +2021,14 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     else:
                         if SHOW_PREV_LINE and idx - 1 >= 0:
                             draw_line(screen, state.lines[idx - 1].text,
-                                      FONT_TOP, False, c_prev, prev_pos,
+                                      FONT_TOP, TOP_BOLD, c_prev, prev_pos,
                                       max_len, ROTATION_DEG)
                         draw_line(screen, state.lines[idx].text, FONT_CURRENT,
                                   CURRENT_BOLD, c_current, curr_pos, max_len,
                                   ROTATION_DEG)
                         if idx + 1 < len(state.lines):
                             draw_line(screen, state.lines[idx + 1].text,
-                                      FONT_BOTTOM, False, c_next, next_pos,
+                                      FONT_BOTTOM, BOTTOM_BOLD, c_next, next_pos,
                                       max_len, ROTATION_DEG)
                             if PROGRESS_BAR and ROTATION_DEG == 0:
                                 _draw_progress(screen, w, curr_pos,
@@ -1962,9 +2036,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 else:
                     # No lyrics (yet) — show track meta with status centered.
                     if state.title:
-                        draw_line(screen, state.artist or "", FONT_TOP, False,
+                        draw_line(screen, state.artist or "", FONT_TOP, TOP_BOLD,
                                   c_prev, prev_pos, max_len, ROTATION_DEG)
-                        draw_line(screen, state.title, FONT_BOTTOM, False,
+                        draw_line(screen, state.title, FONT_BOTTOM, BOTTOM_BOLD,
                                   c_next, next_pos, max_len, ROTATION_DEG)
                         if state.lyrics_status:
                             draw_line(screen, state.lyrics_status, FONT_CURRENT,
@@ -2011,7 +2085,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 async def main() -> None:
     apply_config()
     print(f"[config] lead={LEAD_OFFSET_MS}ms latency={LATENCY_OFFSET_MS}ms "
-          f"fonts={FONT_CURRENT}/{FONT_TOP}/{FONT_BOTTOM} bold={CURRENT_BOLD} "
+          f"fonts={FONT_CURRENT}/{FONT_TOP}/{FONT_BOTTOM} "
+          f"bold={TOP_BOLD}/{CURRENT_BOLD}/{BOTTOM_BOLD} "
           f"prev={SHOW_PREV_LINE} bar={PROGRESS_BAR} dim={DIM_ENABLED} "
           f"dots={INTRO_DOTS_MAX} fps={TARGET_FPS}")
     state = State()
