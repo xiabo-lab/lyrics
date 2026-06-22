@@ -230,7 +230,10 @@ All gestures are tuned to be usable at a glance while driving.
   - **Bluetooth** — **Pair New Phone** (puts the Pi in pairing mode so a new
     phone can connect — the old phone is then dropped), plus a list of paired
     phones each with a **Forget** button.
-  - **Software Version** — build info and the Pi's Bluetooth name.
+  - **Software Version** — build info and the Pi's Bluetooth name, plus
+    **Update Firmware**: pulls the latest code from GitHub and restarts, so you
+    can update with no computer or SSH (tap once to arm, again to confirm). Your
+    `config.json`, cached lyrics, and rejections are preserved across an update.
 - **Double-tap** → toggles a brightness slider; while it's shown, a one-finger
   vertical swipe brightens/darkens.
 - **Two-finger horizontal swipe** → nudges the sync for the *current song only*
@@ -260,6 +263,27 @@ future searches.
 > The QQ/Kugou/NetEase endpoints are public but unofficial and undocumented;
 > they may break without notice. The relevant URLs/constants are grouped at the
 > top of each source block in `lyric_sources.py` if they need fixing.
+
+---
+
+## Updating
+
+**From the screen (no computer needed):** long-press → **Software Version** →
+**Update Firmware**. It downloads the latest code from this repo
+(`xiabo-lab/lyrics`, `main` branch) as a tarball, overwrites the program files,
+and restarts. Tap once to arm, again to confirm. Your `config.json`, cached
+lyrics (`cache/`), and `rejections.json` are **not** touched, so your tuning
+survives.
+
+> **Forks:** the update always pulls from the repo in `UPDATE_URL` near the top
+> of `Lyrics_Display.py`. Point it at your own fork to ship updates to your own
+> devices.
+
+**Manually (if you cloned with git):**
+
+```bash
+cd ~/carlyrics && git pull && sudo systemctl restart carlyric.service
+```
 
 ---
 

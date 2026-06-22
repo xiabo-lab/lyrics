@@ -27,12 +27,18 @@ open; bt-agent (NoInputNoOutput) auto-accepts the Just-Works pairing, then the
 app trusts the device and connects its AVRCP profile.
 """
 import asyncio
+import io
 import json
 import os
+import shutil
+import subprocess
+import tarfile
+import tempfile
 import time
 from pathlib import Path
 
 import pygame
+import requests
 from dbus_next import BusType, Variant
 from dbus_next.aio import MessageBus
 
@@ -56,7 +62,22 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
+
+# ---- Firmware update (Settings → Software Version → Update Firmware) --------
+# "Update Firmware" downloads the latest code straight from GitHub so a user
+# can update without a computer/SSH. We pull the branch tarball (no git needed
+# on the Pi) and overwrite only the files listed below — config.json, cache/
+# and rejections.json are deliberately NOT touched, so the user's tuning and
+# confirmed lyrics survive the update. Forks: point UPDATE_URL at your own repo.
+INSTALL_DIR = Path(__file__).resolve().parent
+UPDATE_URL = "https://github.com/xiabo-lab/lyrics/archive/refs/heads/main.tar.gz"
+UPDATE_FILES = (
+    "Lyrics_Display.py", "lyric_sources.py", "lrclib.py", "test_lyrics.py",
+    "bt-agent.service", "99-carlyric-ignore-avrcp-pointer.rules",
+    "wifi.sh", "carlyric-claude.sudoers", "README.md", "LICENSE", ".gitignore",
+)
+UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
 # plain Device1.Connect()) because a bare Connect() on a dual-mode iPhone
 # often brings up only Bluetooth LE — which exposes no MediaPlayer1, so the
@@ -950,6 +971,102 @@ class BluetoothAdmin:
         await self.refresh_paired()
 
 
+class FirmwareUpdater:
+    """Self-update from GitHub for the Software Version screen.
+
+    Pulls the repo tarball and overwrites only the code/support files in
+    UPDATE_FILES (never config.json / cache/ / rejections.json), then restarts
+    the service so the new code loads. All blocking work runs in a worker
+    thread; `status` is read by the render loop and `busy`/`armed` gate taps.
+    `armed` gives a two-tap confirm so a stray touch can't restart the display
+    mid-drive."""
+
+    def __init__(self):
+        self.status = ""
+        self.busy = False
+        self.armed = False        # first tap arms, second tap confirms
+
+    def reset(self) -> None:
+        """Clear the confirm/state when (re)entering the Version screen."""
+        if not self.busy:
+            self.armed = False
+            self.status = ""
+
+    async def run(self) -> None:
+        """Download + apply the update, then restart. Guarded against re-entry."""
+        if self.busy:
+            return
+        self.busy = True
+        self.armed = False
+        try:
+            self.status = "Downloading update…"
+            count = await asyncio.to_thread(self._download_and_apply)
+            self.status = f"Updated ✓  {count} files — restarting…"
+            print(f"[update] applied {count} files; restarting {UPDATE_SERVICE}")
+            await asyncio.sleep(1.5)        # let the message land on screen
+            await asyncio.to_thread(self._restart)
+            # If the restart takes hold, the process is replaced before here.
+            self.status = "Restart requested…"
+        except Exception as e:
+            print(f"[update] failed: {e}")
+            self.status = f"Update failed: {e}"
+        finally:
+            self.busy = False
+
+    @staticmethod
+    def _download_and_apply() -> int:
+        """Blocking: fetch the tarball and overwrite UPDATE_FILES in place.
+
+        Returns the number of files written. Raises on any failure BEFORE
+        touching the install, and writes each file atomically (temp + replace),
+        so a mid-update network drop can't leave a half-written script."""
+        r = requests.get(UPDATE_URL, timeout=30)
+        r.raise_for_status()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmpdir = Path(tmp)
+            with tarfile.open(fileobj=io.BytesIO(r.content), mode="r:gz") as tar:
+                tar.extractall(tmpdir, filter="data")
+            # The GitHub tarball wraps everything in a single "<repo>-<branch>/".
+            roots = [p for p in tmpdir.iterdir() if p.is_dir()]
+            if not roots:
+                raise RuntimeError("empty archive")
+            src_root = roots[0]
+            count = 0
+            for name in UPDATE_FILES:
+                src = src_root / name
+                if not src.exists():
+                    continue
+                dst = INSTALL_DIR / name
+                tmp_dst = dst.with_name(dst.name + ".new")
+                shutil.copy2(src, tmp_dst)
+                os.replace(tmp_dst, dst)
+                count += 1
+            if count == 0:
+                raise RuntimeError("no matching files in archive")
+            return count
+
+    @staticmethod
+    def _restart() -> None:
+        """Restart the service so the new code loads.
+
+        --no-block: hand the restart job to systemd (PID 1) and return at once,
+        rather than waiting — otherwise systemd kills this very process (and the
+        waiting systemctl child) during the stop phase. The job still runs to
+        completion in PID 1. Absolute path because the cage/root env has a
+        minimal PATH. The app runs as root via systemd, so plain systemctl
+        works; fall back to sudo -n for a non-root launch."""
+        last = None
+        for cmd in (["/usr/bin/systemctl", "restart", "--no-block", UPDATE_SERVICE],
+                    ["sudo", "-n", "/usr/bin/systemctl", "restart", "--no-block",
+                     UPDATE_SERVICE]):
+            try:
+                subprocess.run(cmd, check=True, timeout=15)
+                return
+            except Exception as e:
+                last = e
+        raise RuntimeError(f"restart failed ({last})")
+
+
 def decide_lock(real_ms, elapsed_s, fresh_max_ms, timeout_s):
     """Pure policy: should a just-read Position anchor a freshly-started
     track, and why? Returns (should_lock, reason).
@@ -1224,17 +1341,25 @@ def draw_bluetooth(screen, w, h, bt: "BluetoothAdmin") -> None:
 
 
 # ---- Software version screen -----------------------------------------------
-def _version_back_rect(w: int, h: int) -> "pygame.Rect":
+def _version_layout(w: int, h: int):
+    """Geometry for the Version screen: (update_btn, back_btn). Both full-width,
+    stacked at the bottom so the build info sits above them."""
     margin_x = max(20, int(w * 0.12))
-    return pygame.Rect(margin_x, h - int(h * 0.19), w - 2 * margin_x,
-                       int(h * 0.15))
+    bw = w - 2 * margin_x
+    bh = int(h * 0.15)
+    back = pygame.Rect(margin_x, h - int(h * 0.19), bw, bh)
+    update = pygame.Rect(margin_x, back.y - bh - max(12, int(h * 0.04)), bw, bh)
+    return update, back
 
 
-def draw_version(screen, w, h, bt: "BluetoothAdmin") -> None:
-    """Read-only build info + the Pi's Bluetooth name. Drawn before FLIP_180."""
+def draw_version(screen, w, h, bt: "BluetoothAdmin",
+                 updater: "FirmwareUpdater") -> None:
+    """Build info + Bluetooth name, plus an Update Firmware button (pulls the
+    latest code from GitHub) and Back. Drawn before FLIP_180."""
     screen.fill(BG)
     big = get_font(max(26, min(64, h // 11)), True)
     small = get_font(max(16, min(32, h // 24)), False)
+    btn_font = get_font(max(20, min(42, h // 17)), True)
     lines = [
         (big.render("carlyrics", True, (235, 235, 235))),
         (small.render(f"version {APP_VERSION}", True, (185, 185, 185))),
@@ -1243,14 +1368,26 @@ def draw_version(screen, w, h, bt: "BluetoothAdmin") -> None:
         lines.append(small.render(f"Bluetooth name: {bt.adapter_alias}",
                                   True, (150, 150, 150)))
     total = sum(s.get_height() for s in lines) + 12 * (len(lines) - 1)
-    y = h // 2 - total // 2 - int(h * 0.05)
+    y = int(h * 0.10)
     for surf in lines:
         screen.blit(surf, surf.get_rect(midtop=(w // 2, y)))
         y += surf.get_height() + 12
-    back = _version_back_rect(w, h)
+    update, back = _version_layout(w, h)
+    # Update button: amber while armed/working, slate otherwise.
+    busy_or_armed = updater.busy or updater.armed
+    pygame.draw.rect(screen, (150, 110, 30) if busy_or_armed else (40, 90, 140),
+                     update, border_radius=14)
+    ulbl = "Updating…" if updater.busy else (
+        "Tap again to confirm" if updater.armed else "Update Firmware")
+    u = btn_font.render(ulbl, True, (255, 255, 255))
+    screen.blit(u, u.get_rect(center=update.center))
+    # Status line between the two buttons.
+    if updater.status:
+        s = small.render(updater.status, True, (255, 230, 150))
+        screen.blit(s, s.get_rect(center=(w // 2, (update.bottom + back.top) // 2)))
+    # Back button.
     pygame.draw.rect(screen, (45, 45, 58), back, border_radius=14)
-    bl = get_font(max(20, min(42, h // 17)), True).render(
-        "Back", True, (235, 235, 235))
+    bl = btn_font.render("Back", True, (235, 235, 235))
     screen.blit(bl, bl.get_rect(center=back.center))
 
 
@@ -1339,7 +1476,7 @@ def draw_settings(screen, w, h, sizes: dict, names: dict) -> None:
 
 
 async def render_loop(state: State, watcher: "AvrcpWatcher",
-                      bt: "BluetoothAdmin") -> None:
+                      bt: "BluetoothAdmin", updater: "FirmwareUpdater") -> None:
     pygame.init()
     screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
     w, h = screen.get_size()
@@ -1563,6 +1700,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     menu_screen = "bluetooth"
                     asyncio.create_task(bt.open_screen())
                 elif key == "version":
+                    updater.reset()
                     menu_screen = "version"
                 return
         elif menu_screen == "bluetooth":
@@ -1581,7 +1719,18 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 menu_screen = "main"
                 return
         elif menu_screen == "version":
-            if _version_back_rect(w, h).collidepoint(lx, ly):
+            update, back = _version_layout(w, h)
+            if update.collidepoint(lx, ly):
+                if updater.busy:
+                    return
+                if updater.armed:
+                    asyncio.create_task(updater.run())   # confirmed → go
+                else:
+                    updater.armed = True                 # first tap arms
+                    updater.status = "Pulls latest code from GitHub & restarts"
+                return
+            if back.collidepoint(lx, ly):
+                updater.reset()
                 menu_screen = "main"
 
     frame_interval = 1.0 / TARGET_FPS
@@ -1707,7 +1856,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             elif menu_screen == "bluetooth":
                 draw_bluetooth(screen, w, h, bt)
             elif menu_screen == "version":
-                draw_version(screen, w, h, bt)
+                draw_version(screen, w, h, bt, updater)
             else:
                 # Night auto-dim × manual brightness, then max line width before
                 # shrink-to-fit (both honour live config changes).
@@ -1814,7 +1963,8 @@ async def main() -> None:
     await watcher.start()
     bt = BluetoothAdmin(bus)
     await bt.start()
-    await render_loop(state, watcher, bt)
+    updater = FirmwareUpdater()
+    await render_loop(state, watcher, bt, updater)
 
 
 if __name__ == "__main__":
