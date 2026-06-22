@@ -232,8 +232,10 @@ All gestures are tuned to be usable at a glance while driving.
     phones each with a **Forget** button.
   - **Software Version** — build info and the Pi's Bluetooth name, plus
     **Update Firmware**: pulls the latest code from GitHub and restarts, so you
-    can update with no computer or SSH (tap once to arm, again to confirm). Your
-    `config.json`, cached lyrics, and rejections are preserved across an update.
+    can update with no computer or SSH (tap once to arm, again to confirm). It
+    only applies when GitHub is a **newer** version — otherwise it reports
+    "Already up to date" and leaves the running build alone, so it can never
+    downgrade. Your `config.json`, cached lyrics, and rejections are preserved.
 - **Double-tap** → toggles a brightness slider; while it's shown, a one-finger
   vertical swipe brightens/darkens.
 - **Two-finger horizontal swipe** → nudges the sync for the *current song only*
@@ -270,10 +272,13 @@ future searches.
 
 **From the screen (no computer needed):** long-press → **Software Version** →
 **Update Firmware**. It downloads the latest code from this repo
-(`xiabo-lab/lyrics`, `main` branch) as a tarball, overwrites the program files,
-and restarts. Tap once to arm, again to confirm. Your `config.json`, cached
+(`xiabo-lab/lyrics`, `main` branch) as a tarball, and **only if GitHub's
+`APP_VERSION` is newer** than the running build, overwrites the program files
+and restarts (otherwise it just says "Already up to date" — it never
+downgrades). Tap once to arm, again to confirm. Your `config.json`, cached
 lyrics (`cache/`), and `rejections.json` are **not** touched, so your tuning
-survives.
+survives. So bump `APP_VERSION` in `Lyrics_Display.py` whenever you publish a
+change you want devices to pull.
 
 > **Forks:** the update always pulls from the repo in `UPDATE_URL` near the top
 > of `Lyrics_Display.py`. Point it at your own fork to ship updates to your own

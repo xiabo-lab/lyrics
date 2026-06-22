@@ -30,6 +30,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -62,7 +63,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -992,21 +993,42 @@ class FirmwareUpdater:
             self.armed = False
             self.status = ""
 
+    @staticmethod
+    def _parse_version(s):
+        """'1.3.0' → (1, 3, 0) for ordered comparison, or None if unparseable."""
+        try:
+            return tuple(int(x) for x in s.strip().split("."))
+        except (ValueError, AttributeError):
+            return None
+
     async def run(self) -> None:
-        """Download + apply the update, then restart. Guarded against re-entry."""
+        """Check GitHub, apply only if it's strictly NEWER, then restart.
+
+        The version guard means the button can't downgrade or pointlessly
+        restart: if GitHub is the same or older, we say so and leave the running
+        build alone. Guarded against re-entry."""
         if self.busy:
             return
         self.busy = True
         self.armed = False
         try:
-            self.status = "Downloading update…"
-            count = await asyncio.to_thread(self._download_and_apply)
-            self.status = f"Updated ✓  {count} files — restarting…"
-            print(f"[update] applied {count} files; restarting {UPDATE_SERVICE}")
-            await asyncio.sleep(1.5)        # let the message land on screen
-            await asyncio.to_thread(self._restart)
-            # If the restart takes hold, the process is replaced before here.
-            self.status = "Restart requested…"
+            self.status = "Checking GitHub…"
+            kind, remote_v, count = await asyncio.to_thread(
+                self._download_and_apply)
+            if kind == "updated":
+                self.status = f"Updated to v{remote_v} ({count} files) — restarting…"
+                print(f"[update] applied v{remote_v} ({count} files); restarting")
+                await asyncio.sleep(1.5)     # let the message land on screen
+                await asyncio.to_thread(self._restart)
+                # If the restart takes hold, the process is replaced before here.
+                self.status = "Restart requested…"
+            elif kind == "uptodate":
+                self.status = f"Already up to date (v{remote_v})"
+                print(f"[update] already up to date (v{remote_v})")
+            else:  # "older" — refuse to downgrade
+                self.status = f"GitHub has older v{remote_v}; kept v{APP_VERSION}"
+                print(f"[update] refused downgrade: GitHub v{remote_v} "
+                      f"< running v{APP_VERSION}")
         except Exception as e:
             print(f"[update] failed: {e}")
             self.status = f"Update failed: {e}"
@@ -1014,12 +1036,15 @@ class FirmwareUpdater:
             self.busy = False
 
     @staticmethod
-    def _download_and_apply() -> int:
-        """Blocking: fetch the tarball and overwrite UPDATE_FILES in place.
+    def _download_and_apply():
+        """Blocking: fetch the tarball, compare versions, and (only if GitHub is
+        newer) overwrite UPDATE_FILES in place.
 
-        Returns the number of files written. Raises on any failure BEFORE
-        touching the install, and writes each file atomically (temp + replace),
-        so a mid-update network drop can't leave a half-written script."""
+        Returns (kind, remote_version, count) where kind is
+        "updated" / "uptodate" / "older". Raises on any failure BEFORE touching
+        the install; each file is written atomically (temp + replace) and then
+        chown'd back to the repo-directory owner, so a root-run update doesn't
+        leave root-owned files that break a later scp/git from a dev box."""
         r = requests.get(UPDATE_URL, timeout=30)
         r.raise_for_status()
         with tempfile.TemporaryDirectory() as tmp:
@@ -1031,6 +1056,33 @@ class FirmwareUpdater:
             if not roots:
                 raise RuntimeError("empty archive")
             src_root = roots[0]
+
+            # Version guard: read the incoming APP_VERSION and only apply when
+            # it's strictly newer than what's running.
+            remote_v = None
+            main_src = src_root / "Lyrics_Display.py"
+            if main_src.exists():
+                m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"',
+                              main_src.read_text(encoding="utf-8",
+                                                 errors="replace"))
+                if m:
+                    remote_v = m.group(1)
+            local_t = FirmwareUpdater._parse_version(APP_VERSION)
+            remote_t = FirmwareUpdater._parse_version(remote_v)
+            if remote_t is not None and local_t is not None:
+                if remote_t == local_t:
+                    return ("uptodate", remote_v, 0)
+                if remote_t < local_t:
+                    return ("older", remote_v, 0)
+            # remote is newer (or version couldn't be parsed → trust the
+            # explicit user request and apply).
+
+            # Owner to restore on each written file (the dir owner, e.g. the
+            # repo user), since the service runs as root.
+            try:
+                dir_stat = os.stat(INSTALL_DIR)
+            except OSError:
+                dir_stat = None
             count = 0
             for name in UPDATE_FILES:
                 src = src_root / name
@@ -1040,10 +1092,15 @@ class FirmwareUpdater:
                 tmp_dst = dst.with_name(dst.name + ".new")
                 shutil.copy2(src, tmp_dst)
                 os.replace(tmp_dst, dst)
+                if dir_stat is not None:
+                    try:
+                        os.chown(dst, dir_stat.st_uid, dir_stat.st_gid)
+                    except (OSError, AttributeError):
+                        pass   # not root / not POSIX — leave ownership as-is
                 count += 1
             if count == 0:
                 raise RuntimeError("no matching files in archive")
-            return count
+            return ("updated", remote_v or "?", count)
 
     @staticmethod
     def _restart() -> None:
