@@ -86,8 +86,13 @@ a full desktop. `fonts-noto-cjk` is required for Chinese glyphs.
 ### 2. Get the code
 
 ```bash
-git clone https://github.com/<you>/carlyrics.git ~/carlyrics
+git clone https://github.com/xiabo-lab/lyrics.git ~/carlyrics
 ```
+
+> **Pick your username.** The helper files and the example service unit assume
+> the Linux user `fuwenxu` and the path `/home/fuwenxu/carlyrics`. If your Pi
+> user is different, change it — see
+> [Changing the username](#changing-the-username) below.
 
 ### 3. Pair your phone (first time)
 
@@ -156,6 +161,33 @@ service without a password prompt (edit the username first):
 sudo cp ~/carlyrics/carlyric-claude.sudoers /etc/sudoers.d/carlyric
 sudo chmod 440 /etc/sudoers.d/carlyric
 ```
+
+---
+
+## Changing the username
+
+The repo was developed with the Linux user **`fuwenxu`**, which appears as a
+hard-coded example in a few places. To use your own Pi user, replace `fuwenxu`
+with your username (e.g. the Raspberry Pi OS default `pi`) in these files:
+
+| File | What to change |
+|------|----------------|
+| `carlyric-claude.sudoers` | the leading `fuwenxu` (the user granted password-less restart). |
+| `wifi.sh` | the `ssh fuwenxu@…` hint printed on success. |
+| The systemd unit (Step 5 above) | `User=` and the `/home/fuwenxu/carlyrics` path in `ExecStart`. |
+| `Lyrics_Display.py` (top docstring) | the example `scp`/run commands — comments only, cosmetic. |
+| `Test/*.py` (docstrings) | example paths/commands — comments only, cosmetic. |
+
+A quick way to do them all at once (run from the repo root on the Pi, swapping
+`YOURNAME`):
+
+```bash
+grep -rl fuwenxu . | xargs sed -i 's/fuwenxu/YOURNAME/g'
+```
+
+The home-directory path must also match wherever you cloned the repo
+(`/home/YOURNAME/carlyrics`). Nothing here depends on the literal name
+`fuwenxu` — it's purely the account the files were written for.
 
 ---
 
@@ -262,3 +294,9 @@ python3 -m unittest -v test_lyrics
 Synced lyrics via [LRCLIB](https://lrclib.net) and the public QQ Music, Kugou,
 and NetEase Cloud Music lyric endpoints. Built on [BlueZ](http://www.bluez.org/),
 [cage](https://github.com/cage-kiosk/cage), and [pygame](https://www.pygame.org/).
+
+---
+
+## License
+
+Released under the [MIT License](LICENSE).
