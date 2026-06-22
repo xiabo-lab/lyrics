@@ -204,7 +204,7 @@ can never blank the screen. Code changes still need a service restart.
 | `latency_offset_ms` | Compensation for Bluetooth A2DP audio buffering. |
 | `font_current` / `font_top` / `font_bottom` | Font px for the now line / previous line / next line. |
 | `current_color` / `top_color` / `bottom_color` | Named palette colour per line (yellow, green, white, red, blue, purple). |
-| `current_bold` | Render the current line bold. |
+| `current_bold` / `top_bold` / `bottom_bold` | Render each line (now / previous / next) bold. |
 | `show_prev_line` | Show the previous lyric above the current one. |
 | `progress_bar` | Thin progress bar under the current line. |
 | `intro_dots_max` | Pre-song countdown dots (1 dot ≈ 1 second). |
@@ -225,8 +225,9 @@ which writes them back to `config.json`.
 All gestures are tuned to be usable at a glance while driving.
 
 - **Long-press (10 s, one finger)** → opens the **Settings menu**:
-  - **Font Settings** — a size slider + 6-colour palette for each of the
-    current / top / bottom lines; *Done* saves to `config.json`.
+  - **Font Settings** — a size slider, a 6-colour palette, and a **Bold/Normal**
+    toggle for each of the current / top / bottom lines; *Done* saves to
+    `config.json`.
   - **Bluetooth** — **Pair New Phone** (puts the Pi in pairing mode so a new
     phone can connect — the old phone is then dropped), plus a list of paired
     phones each with a **Forget** button.
