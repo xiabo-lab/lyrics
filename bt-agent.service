@@ -21,6 +21,10 @@ Requires=bluetooth.service
 ExecStart=/usr/bin/bt-agent --capability=NoInputNoOutput
 Restart=always
 RestartSec=2
+# bt-agent doesn't exit on SIGTERM, so without this systemd waits the full
+# DefaultTimeoutStopSec (90s) before force-killing it — making every shutdown
+# hang for 90s. Cap the grace period so it's killed within 5s on stop/shutdown.
+TimeoutStopSec=5s
 
 [Install]
 WantedBy=multi-user.target
