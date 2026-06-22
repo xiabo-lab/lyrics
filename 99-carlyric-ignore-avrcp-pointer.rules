@@ -1,0 +1,9 @@
+# Stop the iPhone's AVRCP Bluetooth media-remote from being treated as a mouse.
+#
+# When the phone connects, BlueZ creates a virtual input device
+# "<phone> (AVRCP)" that advertises EV_REL (relative-pointer) capability
+# alongside its media keys. libinput therefore presents it to cage/wlroots as a
+# pointer, and cage pops a cursor onto the screen the moment it hot-plugs. The
+# lyric app reads playback position over BlueZ D-Bus (MediaPlayer1), NOT from
+# this input device, so libinput can safely ignore it entirely.
+ACTION=="add|change", SUBSYSTEM=="input", KERNEL=="event*", ATTRS{name}=="* (AVRCP)", ENV{LIBINPUT_IGNORE_DEVICE}="1"

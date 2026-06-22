@@ -1,0 +1,26 @@
+# Headless Bluetooth pairing agent for carlyrics.
+#
+# The lyric display has only a touchscreen — no keyboard/terminal — so when a
+# new phone tries to pair, something has to accept the pairing on the Pi's
+# behalf. bt-agent (from the bluez-tools package) registers a NoInputNoOutput
+# agent that auto-accepts the "Just Works" pairing modern phones use. The app
+# itself only flips the adapter Discoverable/Pairable while the on-screen
+# Settings -> Bluetooth -> Pair New Phone screen is open.
+#
+# Install:
+#     sudo apt install -y bluez-tools
+#     sudo cp bt-agent.service /etc/systemd/system/
+#     sudo systemctl enable --now bt-agent
+
+[Unit]
+Description=Bluetooth auto-pairing agent (NoInputNoOutput) for carlyrics
+After=bluetooth.service
+Requires=bluetooth.service
+
+[Service]
+ExecStart=/usr/bin/bt-agent --capability=NoInputNoOutput
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

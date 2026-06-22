@@ -1,0 +1,1 @@
+fuwenxu ALL=(root) NOPASSWD: /usr/bin/systemctl restart carlyric.service, /usr/bin/systemctl start carlyric.service, /usr/bin/systemctl stop carlyric.service
