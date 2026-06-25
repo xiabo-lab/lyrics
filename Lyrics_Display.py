@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -154,6 +154,12 @@ BRIGHTNESS_GAIN = 1.2        # vertical-swipe sensitivity (≈ fraction per scre
 DOUBLE_TAP_S = 0.4           # max gap between two taps to count as a double-tap
 TAP_MAX_MOVE_FRAC = 0.06     # a "tap" stays within this frac of screen width…
 TAP_MAX_DUR_S = 0.4          # …and lifts within this long (else it's a swipe/hold)
+
+# Road-safety notice shown full-screen for this many seconds at every startup,
+# before lyrics begin. This is a glance-only display: the driver's attention
+# belongs on the road, and any real interaction (menus, pairing, picking lyrics)
+# should happen parked or on a home desktop. Set to 0 to skip the notice.
+SAFETY_NOTICE_S = 6.0
 
 # ---- On-screen settings (long-press 10s) ----------------------------------
 # Hold one finger still on the screen for this long to open the settings
@@ -1345,6 +1351,31 @@ def draw_picker(screen, w, h, candidates) -> None:
             midtop=(rect.centerx, y0 + ts.get_height() + gap)))
 
 
+def draw_safety(screen, w, h, remaining: float) -> None:
+    """Full-screen road-safety notice shown for the first SAFETY_NOTICE_S
+    seconds after startup. Amber on dark with an attention border and a
+    countdown so it's clearly temporary. Drawn before the FLIP_180 flip and via
+    draw_line so it rides the same orientation correction as the lyrics."""
+    screen.fill(BG)
+    amber = (255, 190, 60)
+    pygame.draw.rect(screen, amber, screen.get_rect(),
+                     width=max(4, h // 80), border_radius=10)
+    along = h if ROTATION_DEG in (90, 270) else w
+    max_len = int(along * 0.92)
+    big = max(28, min(72, h // 6))
+    sub = max(18, min(38, h // 11))
+    small = max(14, min(26, h // 16))
+    cy = h // 2
+    draw_line(screen, "KEEP YOUR EYES ON THE ROAD", big, True, amber,
+              (w // 2, cy - sub), max_len, ROTATION_DEG)
+    draw_line(screen, "Glance only — set up while parked or on a desktop.",
+              sub, False, (235, 235, 235),
+              (w // 2, cy + big // 2 + 4), max_len, ROTATION_DEG)
+    if remaining > 0:
+        draw_line(screen, f"Starting in {int(remaining) + 1}s…", small, False,
+                  (160, 160, 160), (w // 2, h - small - 8), max_len, ROTATION_DEG)
+
+
 def _draw_brightness_bar(screen, w, h, level, btn_w):
     """Vertical brightness slider hugging the right edge, positioned just LEFT
     of where the red feedback button sits so the two never overlap. `level`
@@ -2001,6 +2032,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 menu_screen = "main"
 
     frame_interval = 1.0 / TARGET_FPS
+    start_mono = time.monotonic()   # for the startup road-safety notice
 
     def _cfg_mtime() -> float:
         try:
@@ -2167,7 +2199,12 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 
             screen.fill(BG)
 
-            if menu_screen == "main":
+            safety_left = SAFETY_NOTICE_S - (time.monotonic() - start_mono)
+            if safety_left > 0:
+                # Road-safety notice takes the whole screen for its first few
+                # seconds, ahead of menus/picker/lyrics.
+                draw_safety(screen, w, h, safety_left)
+            elif menu_screen == "main":
                 draw_main_menu(screen, w, h)
             elif menu_screen == "font":
                 # Font panel replaces the lyric frame entirely.

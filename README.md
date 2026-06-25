@@ -14,6 +14,20 @@ Chinese catalogues) but works with anything that has synced lyrics online.
 
 ---
 
+## ⚠️ Road safety
+
+**This is a glance-only display. Your attention belongs on the road, not the
+screen.** Treat it like a passenger singing along — never stare at it, and never
+operate its touch controls (menus, Bluetooth pairing, the lyric picker) while
+the car is moving. Do all setup and tuning **parked, or on a home desktop.** The
+app shows a brief safety reminder at every startup for this reason.
+
+Driving safely is your responsibility. The author accepts no liability for use
+of this hobby project; use it only in a way that is legal where you drive and
+that keeps your eyes on the road.
+
+---
+
 ## How it works
 
 ```
