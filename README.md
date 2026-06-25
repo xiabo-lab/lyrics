@@ -271,6 +271,11 @@ All gestures are tuned to be usable at a glance while driving.
   tap the right one to switch to it. After a pick both buttons stay up (Red
   reopens the grid) until you confirm with **Green**.
 
+When nothing is playing (the phone has stopped, not just paused), the display
+falls back to an **idle clock** instead of a blank "waiting" note: the date
+(`MM/DD/YYYY`) on top, the current 24-hour time (`HH:MM:SS`) big in the middle
+ticking by the second, and "Waiting for Music" at the bottom.
+
 ---
 
 ## Lyric sources & caching
