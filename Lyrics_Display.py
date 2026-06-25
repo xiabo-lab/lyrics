@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -740,8 +740,13 @@ class AvrcpWatcher:
                 self.start_fetch(title, artist)
                 print(f"[track]    {artist} — {title}")
             elif not (title and artist):
-                # iPhone clears the track on stop — wipe display lyrics too.
+                # iPhone clears the track on stop — wipe display lyrics AND the
+                # track meta so the idle clock screen shows (the render loop
+                # falls back to the clock only when state.title is empty).
                 self.state.lines = []
+                self.state.title = ""
+                self.state.artist = ""
+                self.last_sig = sig
                 self.state.lyrics_status = "(waiting for music)"
                 self.state.awaiting_feedback = False
         if "Position" in changed:
@@ -2441,10 +2446,21 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                       CURRENT_BOLD, c_current, curr_pos, max_len,
                                       ROTATION_DEG)
                     else:
-                        draw_line(screen,
-                                  state.lyrics_status or "(waiting for music)",
+                        # Idle (no track at all): a clock instead of a bare
+                        # "(waiting for music)". Top = 24h time HH:MM:SS,
+                        # middle = date MM/DD/YYYY, bottom = the waiting note.
+                        # strftime is re-evaluated every frame so the seconds
+                        # tick live.
+                        now_local = time.localtime()
+                        draw_line(screen, time.strftime("%H:%M:%S", now_local),
+                                  FONT_TOP, TOP_BOLD, c_prev, prev_pos,
+                                  max_len, ROTATION_DEG)
+                        draw_line(screen, time.strftime("%m/%d/%Y", now_local),
                                   FONT_CURRENT, CURRENT_BOLD, c_current,
                                   curr_pos, max_len, ROTATION_DEG)
+                        draw_line(screen, "Waiting for Music",
+                                  FONT_BOTTOM, BOTTOM_BOLD, c_next, next_pos,
+                                  max_len, ROTATION_DEG)
 
                 # Ask for a verdict on fresh (uncached) lyrics. Drawn before the
                 # flip so the buttons orient with the lyrics.
