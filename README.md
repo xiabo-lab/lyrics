@@ -239,12 +239,18 @@ All gestures are tuned to be usable at a glance while driving.
     downgrade. Your `config.json`, cached lyrics, and rejections are preserved.
 - **Double-tap** → toggles a brightness slider; while it's shown, a one-finger
   vertical swipe brightens/darkens.
+- **Triple-tap** → deletes the current song's **cached** lyrics and shows
+  "This lyric has been deleted.", so a wrong cached match is dropped and
+  re-searched the next time the song plays.
 - **Two-finger horizontal swipe** → nudges the sync for the *current song only*
   (for the rare track whose master timing doesn't match the lyrics). Reset on
   the next track.
 - **Green ✓ / Red ✗ edge buttons** → appear when fresh (uncached) lyrics load.
-  **Green** confirms the match and caches it; **Red** marks the source wrong,
-  remembers that, and re-searches the next source.
+  **Green** confirms the match and caches it. **Red** opens a **picker** — a 3×3
+  grid of up to 9 candidate versions gathered from *every* source (QQ, Kugou,
+  NetEase, LRCLIB) for that song, each cell showing the song title and artist —
+  tap the right one to switch to it. After a pick both buttons stay up (Red
+  reopens the grid) until you confirm with **Green**.
 
 ---
 
@@ -259,9 +265,11 @@ For each track, `lyric_sources.fetch_synced_lyrics_any()` tries, in order:
 
 The first source returning *timestamped* lyrics wins. Results are **not** cached
 automatically — a lyric only sticks once you confirm it with the green button,
-so a wrong match never gets remembered. Marking a result wrong (red button)
-records the offending source in `rejections.json` and skips it for that song on
-future searches.
+so a wrong match never gets remembered. If the auto-picked version is wrong, the
+**red button** opens a picker of candidates gathered across every source
+(QQ ≤3, Kugou ≤3, NetEase ≤1, LRCLIB ≤2 — up to 9 in a 3×3 grid) so you can pick
+the right one by hand, then confirm with green. A **triple-tap** on a playing
+lyric deletes a bad **cached** entry so it's re-searched next time.
 
 > The QQ/Kugou/NetEase endpoints are public but unofficial and undocumented;
 > they may break without notice. The relevant URLs/constants are grouped at the
