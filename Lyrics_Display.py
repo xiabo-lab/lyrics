@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -2447,16 +2447,17 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                       ROTATION_DEG)
                     else:
                         # Idle (no track at all): a clock instead of a bare
-                        # "(waiting for music)". Top = 24h time HH:MM:SS,
-                        # middle = date MM/DD/YYYY, bottom = the waiting note.
-                        # strftime is re-evaluated every frame so the seconds
-                        # tick live.
+                        # "(waiting for music)". Top = date MM/DD/YYYY,
+                        # middle = 24h time HH:MM:SS rendered big (90px, the
+                        # current-line size) so the clock is the focal point,
+                        # bottom = the waiting note. strftime is re-evaluated
+                        # every frame so the seconds tick live.
                         now_local = time.localtime()
-                        draw_line(screen, time.strftime("%H:%M:%S", now_local),
+                        draw_line(screen, time.strftime("%m/%d/%Y", now_local),
                                   FONT_TOP, TOP_BOLD, c_prev, prev_pos,
                                   max_len, ROTATION_DEG)
-                        draw_line(screen, time.strftime("%m/%d/%Y", now_local),
-                                  FONT_CURRENT, CURRENT_BOLD, c_current,
+                        draw_line(screen, time.strftime("%H:%M:%S", now_local),
+                                  90, CURRENT_BOLD, c_current,
                                   curr_pos, max_len, ROTATION_DEG)
                         draw_line(screen, "Waiting for Music",
                                   FONT_BOTTOM, BOTTOM_BOLD, c_next, next_pos,
