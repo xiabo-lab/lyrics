@@ -32,6 +32,29 @@ def fetch_synced_lyrics(track: str, artist: str, album: str = "", duration: int 
     data = r.json()
     return data.get("syncedLyrics")
 
+def search_synced_lyrics(track: str, artist: str, limit: int = 2,
+                         timeout: float = 10) -> list[tuple[str, str, str]]:
+    """Return up to `limit` (trackName, artistName, lrc) tuples that have synced
+    lyrics, via LRCLIB's /search endpoint (which can return several matches for
+    one query). Used to populate the multi-source candidate picker. Both the
+    track name and artist are sent so the matches stay relevant."""
+    params = {"track_name": track, "artist_name": artist}
+    r = requests.get(f"{LRCLIB_BASE}/search", params=params, timeout=timeout)
+    if r.status_code == 404:
+        return []
+    r.raise_for_status()
+    out: list[tuple[str, str, str]] = []
+    for item in r.json() or []:
+        lrc = item.get("syncedLyrics")
+        if not lrc or "[" not in lrc:   # plain/unsynced → useless to us
+            continue
+        out.append((item.get("trackName") or track,
+                    item.get("artistName") or artist, lrc))
+        if len(out) >= limit:
+            break
+    return out
+
+
 def parse_lrc(lrc: str) -> list[LyricLine]:
     """Parse .lrc text into a sorted list of (time_ms, text) lines.
 

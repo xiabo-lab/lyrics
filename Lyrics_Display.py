@@ -45,9 +45,10 @@ from dbus_next.aio import MessageBus
 
 from lrclib import LyricLine, parse_lrc
 from lyric_sources import (
-    add_rejection,
+    delete_from_cache,
     fetch_synced_lyrics_any as fetch_synced_lyrics,
     save_to_cache,
+    search_candidates,
 )
 
 # Silence pygame ALSA warnings — we don't need audio out.
@@ -63,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.5.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -138,7 +139,7 @@ LEAD_OFFSET_MS = 1500
 # DELAY lyrics, right→left to ADVANCE them, SWIPE_STEP_MS per swipe. The nudge
 # lives only on the playing song (State.song_offset_ms) and is wiped on the
 # next track change — most songs are perfect and must not inherit it.
-SWIPE_STEP_MS = 250
+SWIPE_STEP_MS = 1000
 # Each finger must travel at least this fraction of the screen width for a
 # two-finger drag to count as a swipe (filters out taps and tiny jitter).
 SWIPE_MIN_FRAC = 0.15
@@ -1279,6 +1280,77 @@ def _draw_feedback_buttons(screen, green_rect, red_rect):
     pygame.draw.line(screen, white, (rx - s, ry + s), (rx + s, ry - s), lw)
 
 
+# ---- Source picker (RED button → 3x3 candidate grid) -----------------------
+# Tag colours per source, just to make the grid scannable at a glance.
+_SOURCE_TAG_COLORS = {"QQ": (40, 170, 90), "Kugou": (210, 130, 40),
+                      "NetEase": (200, 60, 60), "LRCLIB": (60, 120, 210)}
+
+
+def _picker_layout(w: int, h: int):
+    """A fixed 3x3 grid of candidate cells, row-major, in LOGICAL (pre-FLIP_180)
+    pixels. Shared by the draw pass and the touch hit-test so they never drift.
+    Always 9 cells; empties are drawn faint when there are fewer candidates."""
+    cols = rows = 3
+    mx = max(16, int(w * 0.03))
+    top = max(12, int(h * 0.03))
+    bottom = max(12, int(h * 0.03))
+    gx = max(10, int(w * 0.015))
+    gy = max(10, int(h * 0.02))
+    cell_w = (w - 2 * mx - (cols - 1) * gx) // cols
+    cell_h = (h - top - bottom - (rows - 1) * gy) // rows
+    cells = []
+    for r in range(rows):
+        for c in range(cols):
+            x = mx + c * (cell_w + gx)
+            y = top + r * (cell_h + gy)
+            cells.append(pygame.Rect(x, y, cell_w, cell_h))
+    return cells
+
+
+def _fit_text(text: str, font, max_w: int) -> str:
+    """Truncate text with a trailing ellipsis so it fits within max_w px."""
+    if not text or font.size(text)[0] <= max_w:
+        return text
+    while text and font.size(text + "…")[0] > max_w:
+        text = text[:-1]
+    return (text + "…") if text else "…"
+
+
+def draw_picker(screen, w, h, candidates) -> None:
+    """The consolidated multi-source candidate grid (RED button). Each filled
+    cell is a tappable lyric option showing its source, title and artist; empty
+    cells (when fewer than 9 matched) are dimmed. Drawn before the FLIP_180
+    flip, like the menus (taps are inverted to match — see render_loop)."""
+    screen.fill(BG)
+    cells = _picker_layout(w, h)
+    tag_font = get_font(max(13, min(26, h // 32)), True)
+    title_font = get_font(max(16, min(34, h // 22)), True)
+    sub_font = get_font(max(12, min(24, h // 32)), False)
+    for i, rect in enumerate(cells):
+        if i >= len(candidates):
+            pygame.draw.rect(screen, (30, 30, 38), rect, border_radius=12)
+            continue
+        c = candidates[i]
+        pygame.draw.rect(screen, (48, 48, 62), rect, border_radius=12)
+        pad = max(8, rect.w // 16)
+        inner = rect.w - 2 * pad
+        # Source chip, top-left.
+        tagc = _SOURCE_TAG_COLORS.get(c["source"], (90, 90, 110))
+        tlabel = tag_font.render(c["source"], True, (255, 255, 255))
+        chip = pygame.Rect(rect.x + pad, rect.y + pad,
+                           tlabel.get_width() + 16, tlabel.get_height() + 8)
+        pygame.draw.rect(screen, tagc, chip, border_radius=8)
+        screen.blit(tlabel, tlabel.get_rect(center=chip.center))
+        # Title + artist, truncated to the cell width.
+        ty = chip.bottom + max(6, rect.h // 14)
+        ts = title_font.render(_fit_text(c["title"], title_font, inner),
+                               True, (240, 240, 240))
+        screen.blit(ts, (rect.x + pad, ty))
+        a_s = sub_font.render(_fit_text(c["artist"], sub_font, inner),
+                              True, (180, 180, 190))
+        screen.blit(a_s, (rect.x + pad, ty + ts.get_height() + 6))
+
+
 def _draw_brightness_bar(screen, w, h, level, btn_w):
     """Vertical brightness slider hugging the right edge, positioned just LEFT
     of where the red feedback button sits so the two never overlap. `level`
@@ -1606,13 +1678,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             state.awaiting_feedback = False
         elif red_rect.collidepoint(px, py):
             last_tap = now_t
-            print(f"[feedback] ✗ wrong → rejecting {state.lyrics_source}, "
-                  f"re-searching next source")
-            add_rejection(state.title, state.artist, state.lyrics_source)
-            state.lines = []
-            state.lyrics_status = "(re-searching…)"
-            state.awaiting_feedback = False
-            watcher.start_fetch(state.title, state.artist)
+            print("[feedback] ✗ wrong → opening multi-source picker")
+            asyncio.create_task(open_picker())
 
     # ---- Touch gestures -----------------------------------------------------
     # fingers maps SDL finger_id → {sx, sy, x, y, t} in LOGICAL (pre-flip)
@@ -1629,7 +1696,18 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     toast_until = 0.0
     brightness_ui = False        # slider visible?
     user_brightness = 1.0        # 0.15..1.0 software dimmer
-    last_tap_time = 0.0          # for double-tap detection
+    last_tap_time = 0.0          # for double-/triple-tap detection
+    tap_count = 0                # consecutive quick taps (2 = brightness, 3 = delete)
+
+    # ---- Source picker (RED button → 3x3 candidate grid) -------------------
+    # picker is the candidate list while the grid is shown (None = hidden).
+    # While picker_searching we're gathering candidates in a worker thread.
+    # picker_cache (+ its sig) lets a re-open of the SAME song skip the network.
+    picker = None
+    picker_searching = False
+    picker_cache: list = []
+    picker_cache_sig = None
+    last_picker_tap = 0.0
 
     # ---- Settings menu (long-press 10s) -------------------------------------
     # menu_screen drives a small state machine that replaces lyric rendering:
@@ -1673,6 +1751,72 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         toast_until = time.monotonic() + 1.5
         print(f"[nudge] {'delay' if direction > 0 else 'advance'} → "
               f"song_offset={state.song_offset_ms:+d}ms")
+
+    def delete_current_lyrics() -> None:
+        """Triple-tap: evict the playing song's cached LRC so the next play
+        re-searches it. Same effect as the RED button on a cache hit, but
+        reachable any time lyrics are on screen. Safe if nothing was cached
+        (delete_from_cache no-ops on a missing file)."""
+        nonlocal toast_text, toast_until
+        if not state.lines:
+            return                # nothing displayed → nothing to delete
+        try:
+            delete_from_cache(state.title, state.artist)
+            print(f"[delete] cache evicted → {state.artist} — {state.title}")
+        except Exception as e:
+            print(f"[delete] cache evict failed: {e}")
+        toast_text = "This lyric has been deleted."
+        toast_until = time.monotonic() + 2.5
+
+    async def open_picker() -> None:
+        """RED tapped: gather a consolidated multi-source candidate list and
+        show the 3x3 grid. Re-opening the same song reuses the cached results
+        (no second network sweep). Runs the blocking fetch in a thread."""
+        nonlocal picker, picker_searching, picker_cache, picker_cache_sig
+        if picker_searching or picker is not None:
+            return
+        sig = (state.title, state.artist)
+        if picker_cache_sig == sig and picker_cache:
+            picker = picker_cache
+            fingers.clear()      # drop the RED-tap finger so it can't linger
+            return
+        picker_searching = True
+        try:
+            cands = await asyncio.to_thread(
+                search_candidates, state.title, state.artist)
+        except Exception as e:
+            print(f"[picker] search error: {e}")
+            cands = []
+        picker_searching = False
+        # A track change during the sweep makes these results stale — drop them.
+        if (state.title, state.artist) != sig:
+            return
+        if cands:
+            picker_cache, picker_cache_sig, picker = cands, sig, cands
+            fingers.clear()      # drop the RED-tap finger so it can't linger
+            print(f"[picker] showing {len(cands)} candidate(s)")
+        else:
+            state.lyrics_status = "♪ No other versions found"
+            print("[picker] no candidates found")
+
+    def select_candidate(i: int) -> None:
+        """Tap on a grid cell: show that candidate's lyrics and keep BOTH
+        feedback buttons up — GREEN to confirm/cache, RED to reopen the grid —
+        until the user commits with GREEN."""
+        nonlocal picker, last_tap
+        if picker is None or not (0 <= i < len(picker)):
+            return
+        c = picker[i]
+        state.lines = parse_lrc(c["lrc"])
+        state.lrc_raw = c["lrc"]
+        state.lyrics_source = c["source"]
+        state.lyrics_status = ""
+        state.awaiting_feedback = True       # both buttons stay until GREEN
+        picker = None
+        # Swallow the trailing synthesized MOUSEBUTTONDOWN so it can't land on a
+        # feedback button right after the pick (handle_tap honours last_tap).
+        last_tap = time.monotonic()
+        print(f"[picker] selected {c['source']} — {c['title']}")
 
     def check_swipe() -> None:
         nonlocal swipe_fired
@@ -1905,6 +2049,35 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                             px, py = w - 1 - px, h - 1 - py
                         menu_touch(px, py, False)
                     continue
+                if picker is not None:
+                    # The candidate grid owns the screen: a tap on a cell selects
+                    # that lyric. Debounced so the FINGERDOWN + synthesized
+                    # MOUSEBUTTONDOWN pair counts once. All other events are
+                    # swallowed so they can't leak into the lyric gestures.
+                    # IMPORTANT: still drain FINGERUP from `fingers`, else a
+                    # finger held through the RED tap stays stuck → it would trip
+                    # the long-press (opening Settings) and wedge settings_armed.
+                    if event.type == pygame.FINGERUP:
+                        fingers.pop(event.finger_id, None)
+                        continue
+                    tap_xy = None
+                    if event.type == pygame.FINGERDOWN:
+                        tap_xy = (_logical_x(event.x), _logical_y(event.y))
+                    elif (event.type == pygame.MOUSEBUTTONDOWN
+                          and event.button == 1):
+                        px, py = event.pos
+                        if FLIP_180:
+                            px, py = w - 1 - px, h - 1 - py
+                        tap_xy = (px, py)
+                    if tap_xy is not None:
+                        now_t = time.monotonic()
+                        if now_t - last_picker_tap >= 0.35:
+                            last_picker_tap = now_t
+                            for i, rect in enumerate(_picker_layout(w, h)):
+                                if i < len(picker) and rect.collidepoint(*tap_xy):
+                                    select_candidate(i)
+                                    break
+                    continue
                 # Touch: SDL delivers FINGERDOWN (normalized 0..1 coords) and,
                 # with touch-mouse emulation, a MOUSEBUTTONDOWN (pixel coords).
                 # handle_tap debounces so a single tap fires once.
@@ -1929,18 +2102,32 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                 user_brightness - dy * BRIGHTNESS_GAIN))
                 elif event.type == pygame.FINGERUP:
                     f = fingers.pop(event.finger_id, None)
-                    # Double-tap (two quick, near-stationary taps) toggles the
-                    # brightness slider.
+                    # Count consecutive quick, near-stationary taps: the 2nd
+                    # toggles the brightness slider, the 3rd deletes the playing
+                    # song's cached lyric. A gap longer than DOUBLE_TAP_S (or any
+                    # non-tap gesture) restarts the count.
                     if f is not None:
                         dur = time.monotonic() - f["t"]
                         moved = max(abs(f["x"] - f["sx"]), abs(f["y"] - f["sy"]))
                         if dur <= TAP_MAX_DUR_S and moved <= tap_max_move_px:
                             now_t = time.monotonic()
                             if now_t - last_tap_time <= DOUBLE_TAP_S:
-                                brightness_ui = not brightness_ui
-                                last_tap_time = 0.0   # consume, no triple-toggle
+                                tap_count += 1
                             else:
-                                last_tap_time = now_t
+                                tap_count = 1
+                            last_tap_time = now_t
+                            if tap_count == 2:
+                                brightness_ui = not brightness_ui
+                            elif tap_count >= 3:
+                                # The 2nd tap already flipped the slider; undo
+                                # that so a triple-tap leaves brightness as it
+                                # was and only deletes.
+                                brightness_ui = not brightness_ui
+                                delete_current_lyrics()
+                                tap_count = 0
+                                last_tap_time = 0.0   # consume, no 4th-tap toggle
+                        else:
+                            tap_count = 0
                     if not fingers:        # gesture over → arm the next swipe
                         swipe_fired = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -1948,13 +2135,21 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 
             # Long-press: one finger held near-still for LONGPRESS_OPEN_S opens
             # the settings panel. (Two-finger swipes have their own gesture, so
-            # we only arm this on a single stationary finger.)
-            if menu_screen is None and len(fingers) == 1:
+            # we only arm this on a single stationary finger.) Suppressed while
+            # the source picker is up or being gathered, so resting a finger on
+            # the grid to choose can't pop the Settings menu.
+            if (menu_screen is None and picker is None and not picker_searching
+                    and len(fingers) == 1):
                 f = next(iter(fingers.values()))
                 if (max(abs(f["x"] - f["sx"]), abs(f["y"] - f["sy"]))
                         <= tap_max_move_px
                         and time.monotonic() - f["t"] >= LONGPRESS_OPEN_S):
                     open_menu()
+
+            # A new song arrived while the picker was up → its candidates are
+            # stale, so drop the grid and let the new track's lyrics show.
+            if picker is not None and (state.title, state.artist) != picker_cache_sig:
+                picker = None
 
             # Hot-reload config.json (≤1s after you save it) so offset / font
             # / dot tweaks take effect without a restart. Skipped while the
@@ -1984,6 +2179,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 # Font panel replaces the lyric frame entirely.
                 draw_settings(screen, w, h, _settings_sizes(), set_color_names,
                               _settings_bolds())
+            elif picker is not None:
+                # RED-button candidate grid replaces the lyric frame.
+                draw_picker(screen, w, h, picker)
             elif menu_screen == "bluetooth":
                 draw_bluetooth(screen, w, h, bt)
             elif menu_screen == "version":
@@ -2068,6 +2266,13 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     draw_line(screen, toast_text, FONT_SYNC, True,
                               scale_color((120, 200, 255), bf),
                               (w // 2, FONT_SYNC // 2 + 4), max_len, ROTATION_DEG)
+
+                # Gathering candidates after a RED tap — banner near the bottom
+                # so the user knows the grid is on its way.
+                if picker_searching:
+                    draw_line(screen, "♪ Searching all sources…", FONT_SYNC,
+                              True, scale_color((120, 200, 255), bf),
+                              (w // 2, h - FONT_SYNC), max_len, ROTATION_DEG)
 
             if FLIP_180:
                 # Monitor is physically mounted upside-down — flip the whole

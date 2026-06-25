@@ -26,7 +26,10 @@ from pathlib import Path
 
 import requests
 
-from lrclib import fetch_synced_lyrics as _fetch_lrclib
+from lrclib import (
+    fetch_synced_lyrics as _fetch_lrclib,
+    search_synced_lyrics as _search_lrclib,
+)
 
 # --- Local cache -----------------------------------------------------------
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
@@ -368,6 +371,170 @@ def fetch_lrclib(track: str, artist: str) -> str | None:
 # in rejections.json, so keep them stable.
 _SOURCES = (("QQ", fetch_qq), ("Kugou", fetch_kugou),
             ("NetEase", fetch_netease), ("LRCLIB", fetch_lrclib))
+
+
+# --- Multi-result search (RED-button picker) -------------------------------
+# When the user taps RED we no longer just reject + advance one source; we
+# gather a CONSOLIDATED list of candidate lyrics from every source so they can
+# pick the right version by hand. Per-source caps (sum = 9, a 3x3 grid):
+CANDIDATE_CAPS = (("QQ", 3), ("Kugou", 3), ("NetEase", 1), ("LRCLIB", 2))
+
+
+def _qq_search_list(track: str, artist: str, limit: int,
+                    timeout: float = 10) -> list[tuple[str, str, str]]:
+    """Up to `limit` (songmid, title, artist) QQ matches for (track, artist)."""
+    query = f"{track} {artist}".strip()
+    if not query:
+        return []
+    r = requests.get(
+        QQ_SEARCH,
+        params={"w": query, "format": "json", "n": max(limit, 1), "p": 1},
+        headers=QQ_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    songs = (((r.json().get("data") or {}).get("song")) or {}).get("list") or []
+    out = []
+    for s in songs[:limit]:
+        mid = s.get("songmid")
+        if not mid:
+            continue
+        names = "/".join(x.get("name", "") for x in (s.get("singer") or [])
+                         if x.get("name"))
+        out.append((mid, s.get("songname") or track, names or artist))
+    return out
+
+
+def qq_candidates(track: str, artist: str, limit: int) -> list[dict]:
+    out: list[dict] = []
+    try:
+        for mid, title, a in _qq_search_list(track, artist, limit):
+            try:
+                lrc = _qq_lyric(mid)
+            except requests.RequestException:
+                lrc = None
+            if lrc:
+                out.append({"source": "QQ", "title": title,
+                            "artist": a, "lrc": lrc})
+            if len(out) >= limit:
+                break
+    except requests.RequestException as e:
+        print(f"[qq] candidates error: {e}")
+    return out
+
+
+def _kugou_search_list(track: str, artist: str, limit: int,
+                       timeout: float = 10) -> list[tuple[str, str, str]]:
+    """Up to `limit` (hash, title, artist) Kugou matches for (track, artist)."""
+    query = f"{track} {artist}".strip()
+    if not query:
+        return []
+    r = requests.get(
+        KUGOU_SEARCH,
+        params={"format": "json", "keyword": query, "page": 1,
+                "pagesize": max(limit, 1), "showtype": 1},
+        headers=KUGOU_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    songs = (r.json().get("data") or {}).get("info") or []
+    out = []
+    for s in songs[:limit]:
+        h = s.get("hash")
+        if not h:
+            continue
+        out.append((h, s.get("songname") or track, s.get("singername") or artist))
+    return out
+
+
+def kugou_candidates(track: str, artist: str, limit: int) -> list[dict]:
+    out: list[dict] = []
+    try:
+        for h, title, a in _kugou_search_list(track, artist, limit):
+            try:
+                lrc = _kugou_lyric(h)
+            except requests.RequestException:
+                lrc = None
+            if lrc:
+                out.append({"source": "Kugou", "title": title,
+                            "artist": a, "lrc": lrc})
+            if len(out) >= limit:
+                break
+    except requests.RequestException as e:
+        print(f"[kugou] candidates error: {e}")
+    return out
+
+
+def _netease_search_list(track: str, artist: str, limit: int,
+                         timeout: float = 10) -> list[tuple[int, str, str]]:
+    """Up to `limit` (song_id, title, artist) NetEase matches."""
+    query = f"{track} {artist}".strip()
+    if not query:
+        return []
+    r = requests.get(
+        NETEASE_SEARCH,
+        params={"s": query, "type": 1, "limit": max(limit, 1)},
+        headers=NETEASE_HEADERS, timeout=timeout)
+    r.raise_for_status()
+    songs = ((r.json().get("result") or {}).get("songs")) or []
+    out = []
+    for s in songs[:limit]:
+        sid = s.get("id")
+        if sid is None:
+            continue
+        names = "/".join(x.get("name", "") for x in (s.get("artists") or [])
+                         if x.get("name"))
+        out.append((sid, s.get("name") or track, names or artist))
+    return out
+
+
+def netease_candidates(track: str, artist: str, limit: int) -> list[dict]:
+    out: list[dict] = []
+    try:
+        for sid, title, a in _netease_search_list(track, artist, limit):
+            try:
+                lrc = _netease_lyric(sid)
+            except requests.RequestException:
+                lrc = None
+            if lrc:
+                out.append({"source": "NetEase", "title": title,
+                            "artist": a, "lrc": lrc})
+            if len(out) >= limit:
+                break
+    except requests.RequestException as e:
+        print(f"[netease] candidates error: {e}")
+    return out
+
+
+def lrclib_candidates(track: str, artist: str, limit: int) -> list[dict]:
+    out: list[dict] = []
+    try:
+        for title, a, lrc in _search_lrclib(track, artist, limit):
+            out.append({"source": "LRCLIB", "title": title,
+                        "artist": a, "lrc": lrc})
+    except requests.RequestException as e:
+        print(f"[lrclib] candidates error: {e}")
+    return out
+
+
+_CANDIDATE_FNS = {"QQ": qq_candidates, "Kugou": kugou_candidates,
+                  "NetEase": netease_candidates, "LRCLIB": lrclib_candidates}
+
+
+def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
+    """Consolidated candidate list across every source for the RED-button
+    picker: QQ ≤3, Kugou ≤3, NetEase ≤1, LRCLIB ≤2 (≤9 total). Each item is
+    {"source", "title", "artist", "lrc"}. Sources are queried independently and
+    a failing one simply contributes nothing. `progress(name)` (optional) is
+    called before each source is queried, for a live status line; it must not
+    raise."""
+    out: list[dict] = []
+    for name, cap in CANDIDATE_CAPS:
+        if progress is not None:
+            try:
+                progress(name)
+            except Exception:
+                pass
+        items = _CANDIDATE_FNS[name](track, artist, cap)
+        print(f"[picker] {name}: {len(items)} candidate(s)")
+        out.extend(items)
+    return out[:9]
 
 
 # --- Combined cascade ------------------------------------------------------
