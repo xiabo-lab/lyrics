@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -1281,11 +1281,6 @@ def _draw_feedback_buttons(screen, green_rect, red_rect):
 
 
 # ---- Source picker (RED button → 3x3 candidate grid) -----------------------
-# Tag colours per source, just to make the grid scannable at a glance.
-_SOURCE_TAG_COLORS = {"QQ": (40, 170, 90), "Kugou": (210, 130, 40),
-                      "NetEase": (200, 60, 60), "LRCLIB": (60, 120, 210)}
-
-
 def _picker_layout(w: int, h: int):
     """A fixed 3x3 grid of candidate cells, row-major, in LOGICAL (pre-FLIP_180)
     pixels. Shared by the draw pass and the touch hit-test so they never drift.
@@ -1318,37 +1313,36 @@ def _fit_text(text: str, font, max_w: int) -> str:
 
 def draw_picker(screen, w, h, candidates) -> None:
     """The consolidated multi-source candidate grid (RED button). Each filled
-    cell is a tappable lyric option showing its source, title and artist; empty
-    cells (when fewer than 9 matched) are dimmed. Drawn before the FLIP_180
-    flip, like the menus (taps are inverted to match — see render_loop)."""
+    cell is a tappable lyric option showing the song title (big) and artist
+    (smaller), centred so it reads from across the car; empty cells (when fewer
+    than 9 matched) are dimmed. The source isn't shown — dropping that chip
+    frees the whole cell for larger text (still tracked internally for caching).
+    Drawn before the FLIP_180 flip, like the menus (taps inverted to match)."""
     screen.fill(BG)
     cells = _picker_layout(w, h)
-    tag_font = get_font(max(13, min(26, h // 32)), True)
-    title_font = get_font(max(16, min(34, h // 22)), True)
-    sub_font = get_font(max(12, min(24, h // 32)), False)
+    cell_h = cells[0].h if cells else h // 3
+    # Fonts scale off the cell height so the title fills the freed space; the
+    # min/max clamps keep it sane on very short or very tall panels.
+    title_font = get_font(max(26, min(60, int(cell_h * 0.36))), True)
+    sub_font = get_font(max(20, min(46, int(cell_h * 0.27))), False)
+    gap = max(4, cell_h // 16)
     for i, rect in enumerate(cells):
         if i >= len(candidates):
             pygame.draw.rect(screen, (30, 30, 38), rect, border_radius=12)
             continue
         c = candidates[i]
         pygame.draw.rect(screen, (48, 48, 62), rect, border_radius=12)
-        pad = max(8, rect.w // 16)
-        inner = rect.w - 2 * pad
-        # Source chip, top-left.
-        tagc = _SOURCE_TAG_COLORS.get(c["source"], (90, 90, 110))
-        tlabel = tag_font.render(c["source"], True, (255, 255, 255))
-        chip = pygame.Rect(rect.x + pad, rect.y + pad,
-                           tlabel.get_width() + 16, tlabel.get_height() + 8)
-        pygame.draw.rect(screen, tagc, chip, border_radius=8)
-        screen.blit(tlabel, tlabel.get_rect(center=chip.center))
-        # Title + artist, truncated to the cell width.
-        ty = chip.bottom + max(6, rect.h // 14)
+        inner = rect.w - 2 * max(10, rect.w // 22)
         ts = title_font.render(_fit_text(c["title"], title_font, inner),
-                               True, (240, 240, 240))
-        screen.blit(ts, (rect.x + pad, ty))
+                               True, (245, 245, 245))
         a_s = sub_font.render(_fit_text(c["artist"], sub_font, inner),
-                              True, (180, 180, 190))
-        screen.blit(a_s, (rect.x + pad, ty + ts.get_height() + 6))
+                              True, (185, 185, 195))
+        # Vertically centre the title+artist block inside the cell.
+        block_h = ts.get_height() + gap + a_s.get_height()
+        y0 = rect.y + (rect.h - block_h) // 2
+        screen.blit(ts, ts.get_rect(midtop=(rect.centerx, y0)))
+        screen.blit(a_s, a_s.get_rect(
+            midtop=(rect.centerx, y0 + ts.get_height() + gap)))
 
 
 def _draw_brightness_bar(screen, w, h, level, btn_w):
