@@ -245,6 +245,11 @@ All gestures are tuned to be usable at a glance while driving.
   - **Bluetooth** — **Pair New Phone** (puts the Pi in pairing mode so a new
     phone can connect — the old phone is then dropped), plus a list of paired
     phones each with a **Forget** button.
+  - **Other Settings** — Yes/No toggles for **Rotate Screen 180°** (`flip_180`)
+    and **Auto Dim** (`dim_enabled`), plus ± steppers for **Bluetooth A2DP
+    Offset** (`latency_offset_ms`, 0–3 s in 0.1 s steps) and **Lyrics Timing
+    Offset** (`lead_offset_ms`, −3…+3 s in 0.5 s steps). Each tap previews live
+    and saves to `config.json` immediately.
   - **Software Version** — build info and the Pi's Bluetooth name, plus
     **Update Firmware**: pulls the latest code from GitHub and restarts, so you
     can update with no computer or SSH (tap once to arm, again to confirm). It

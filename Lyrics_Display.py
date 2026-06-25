@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -1408,6 +1408,7 @@ def _draw_brightness_bar(screen, w, h, level, btn_w):
 MAIN_MENU_ITEMS = (
     ("font", "Font Settings"),
     ("bluetooth", "Bluetooth"),
+    ("other", "Other Settings"),
     ("version", "Software Version"),
     ("close", "Close"),
 )
@@ -1547,6 +1548,112 @@ def draw_version(screen, w, h, bt: "BluetoothAdmin",
         s = small.render(updater.status, True, (255, 230, 150))
         screen.blit(s, s.get_rect(center=(w // 2, (update.bottom + back.top) // 2)))
     # Back button.
+    pygame.draw.rect(screen, (45, 45, 58), back, border_radius=14)
+    bl = btn_font.render("Back", True, (235, 235, 235))
+    screen.blit(bl, bl.get_rect(center=back.center))
+
+
+# ---- Other settings screen -------------------------------------------------
+# Misc toggles/steppers that don't belong on the font panel. Each row is
+# (key, label, kind, *args):
+#   ("flip_180", "...", "toggle")                  → live FLIP_180/DIM_ENABLED
+#   ("latency_offset_ms", "...", "step", lo, hi, step)  → ± a numeric global
+# lo/hi/step are in the global's own units (ms here). Edits preview live and
+# are written to config.json immediately, riding the same hot-reload path as a
+# hand edit.
+OTHER_ROWS = (
+    ("flip_180", "Rotate Screen 180°", "toggle"),
+    ("latency_offset_ms", "Bluetooth A2DP Offset", "step", 0, 3000, 100),
+    ("lead_offset_ms", "Lyrics Timing Offset", "step", -3000, 3000, 500),
+    ("dim_enabled", "Auto Dim", "toggle"),
+)
+
+
+def _other_value(key: str):
+    """Current live value for an Other-settings key (reads the global)."""
+    return {
+        "flip_180": FLIP_180,
+        "latency_offset_ms": LATENCY_OFFSET_MS,
+        "lead_offset_ms": LEAD_OFFSET_MS,
+        "dim_enabled": DIM_ENABLED,
+    }[key]
+
+
+def _fmt_offset(ms: int, signed: bool) -> str:
+    """ms → a compact seconds label, e.g. '0.3s' or '+1.5s' / '-0.5s'."""
+    return f"{ms / 1000.0:+.1f}s" if signed else f"{ms / 1000.0:.1f}s"
+
+
+def _other_layout(w: int, h: int):
+    """Geometry for the Other Settings screen, in LOGICAL (pre-FLIP_180) px.
+
+    Returns (rows, back) where rows = [(key, kind, controls), ...] and controls
+    is {"row": Rect, "toggle": Rect} for a toggle, or
+    {"row": Rect, "minus": Rect, "plus": Rect, "value": Rect} for a stepper."""
+    margin_x = max(20, int(w * 0.06))
+    top = int(h * 0.08)
+    back_h = int(h * 0.15)
+    bottom_pad = int(h * 0.03)
+    n = len(OTHER_ROWS)
+    gap = max(10, int(h * 0.025))
+    avail = h - top - back_h - bottom_pad - int(h * 0.04)
+    row_h = max(56, (avail - (n - 1) * gap) // n)
+    # Controls live in the right ~46% of each row; the label fills the left.
+    ctrl_w = int(w * 0.46)
+    ctrl_x = w - margin_x - ctrl_w
+    btn = min(row_h - 8, int(ctrl_w * 0.30))
+    rows = []
+    for i, row in enumerate(OTHER_ROWS):
+        key, kind = row[0], row[2]
+        y = top + i * (row_h + gap)
+        rrect = pygame.Rect(margin_x, y, w - 2 * margin_x, row_h)
+        cy = y + (row_h - btn) // 2
+        if kind == "toggle":
+            tw = int(ctrl_w * 0.55)
+            toggle = pygame.Rect(ctrl_x + ctrl_w - tw, cy, tw, btn)
+            rows.append((key, kind, {"row": rrect, "toggle": toggle}))
+        else:
+            minus = pygame.Rect(ctrl_x, cy, btn, btn)
+            plus = pygame.Rect(ctrl_x + ctrl_w - btn, cy, btn, btn)
+            value = pygame.Rect(minus.right, y, plus.left - minus.right, row_h)
+            rows.append((key, kind,
+                         {"row": rrect, "minus": minus, "plus": plus,
+                          "value": value}))
+    margin_b = max(20, int(w * 0.12))
+    back = pygame.Rect(margin_b, h - back_h - bottom_pad, w - 2 * margin_b,
+                       back_h)
+    return rows, back
+
+
+def draw_other(screen, w, h) -> None:
+    """Render the Other Settings screen: Yes/No toggles + ± steppers, plus
+    Back. Reads the live globals; drawn before the FLIP_180 flip."""
+    screen.fill(BG)
+    label_font = get_font(max(18, min(36, h // 20)), True)
+    val_font = get_font(max(20, min(40, h // 18)), True)
+    btn_font = get_font(max(22, min(46, h // 16)), True)
+    rows, back = _other_layout(w, h)
+    labels = {r[0]: r[1] for r in OTHER_ROWS}
+    for key, kind, ctrl in rows:
+        rrect = ctrl["row"]
+        lbl = label_font.render(labels[key], True, (235, 235, 235))
+        screen.blit(lbl, (rrect.x + 6, rrect.centery - lbl.get_height() // 2))
+        if kind == "toggle":
+            on = bool(_other_value(key))
+            t = ctrl["toggle"]
+            pygame.draw.rect(screen, (40, 120, 50) if on else (95, 55, 55),
+                             t, border_radius=12)
+            ts = btn_font.render("Yes" if on else "No", True, (255, 255, 255))
+            screen.blit(ts, ts.get_rect(center=t.center))
+        else:
+            for bk, sym in (("minus", "−"), ("plus", "+")):
+                b = ctrl[bk]
+                pygame.draw.rect(screen, (45, 80, 130), b, border_radius=10)
+                bs = btn_font.render(sym, True, (255, 255, 255))
+                screen.blit(bs, bs.get_rect(center=b.center))
+            vtxt = _fmt_offset(_other_value(key), key == "lead_offset_ms")
+            vs = val_font.render(vtxt, True, (255, 220, 120))
+            screen.blit(vs, vs.get_rect(center=ctrl["value"].center))
     pygame.draw.rect(screen, (45, 45, 58), back, border_radius=14)
     bl = btn_font.render("Back", True, (235, 235, 235))
     screen.blit(bl, bl.get_rect(center=back.center))
@@ -1740,6 +1847,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     #   "main"       → top-level menu (Font / Bluetooth / Software Version)
     #   "font"       → the size-slider + colour-swatch panel
     #   "bluetooth"  → pair a new phone / forget paired phones
+    #   "other"      → misc toggles/steppers (flip, A2DP/lyric offset, auto-dim)
     #   "version"    → read-only build info
     menu_screen: str | None = None
     settings_armed = False       # ignore touches until the opening hold lifts
@@ -1934,6 +2042,59 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             print(f"[settings] save failed: {e}")
         menu_screen = "main"
 
+    def other_save() -> None:
+        """Persist the Other Settings to config.json and bump last_cfg_mtime so
+        the hot-reload watcher doesn't re-apply (and log) our own write."""
+        nonlocal last_cfg_mtime
+        try:
+            write_config_values({
+                "flip_180": FLIP_180,
+                "latency_offset_ms": LATENCY_OFFSET_MS,
+                "lead_offset_ms": LEAD_OFFSET_MS,
+                "dim_enabled": DIM_ENABLED,
+            })
+            last_cfg_mtime = _cfg_mtime()
+            print(f"[other] saved flip={FLIP_180} "
+                  f"latency={LATENCY_OFFSET_MS}ms lead={LEAD_OFFSET_MS}ms "
+                  f"dim={DIM_ENABLED}")
+        except Exception as e:
+            print(f"[other] save failed: {e}")
+
+    def other_touch(lx: float, ly: float) -> None:
+        """Tap handler for the Other Settings screen (tap-only): flip a toggle
+        or ± a stepper, persist it, or return to the main menu via Back."""
+        nonlocal menu_screen
+        global FLIP_180, DIM_ENABLED, LATENCY_OFFSET_MS, LEAD_OFFSET_MS
+        rows, back = _other_layout(w, h)
+        if back.collidepoint(lx, ly):
+            menu_screen = "main"
+            return
+        specs = {r[0]: r for r in OTHER_ROWS}
+        for key, kind, ctrl in rows:
+            if kind == "toggle":
+                if ctrl["toggle"].collidepoint(lx, ly):
+                    if key == "flip_180":
+                        FLIP_180 = not FLIP_180
+                    else:
+                        DIM_ENABLED = not DIM_ENABLED
+                    other_save()
+                    return
+                continue
+            lo, hi, step = specs[key][3], specs[key][4], specs[key][5]
+            cur = LATENCY_OFFSET_MS if key == "latency_offset_ms" else LEAD_OFFSET_MS
+            if ctrl["minus"].collidepoint(lx, ly):
+                new = max(lo, cur - step)
+            elif ctrl["plus"].collidepoint(lx, ly):
+                new = min(hi, cur + step)
+            else:
+                continue
+            if key == "latency_offset_ms":
+                LATENCY_OFFSET_MS = new
+            else:
+                LEAD_OFFSET_MS = new
+            other_save()
+            return
+
     def settings_touch(lx: float, ly: float, motion: bool) -> None:
         """Route a logical-coord touch on the font panel to a slider
         (drag-or-tap), a colour swatch (tap), a Bold/Normal toggle (tap), or the
@@ -1997,6 +2158,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 elif key == "bluetooth":
                     menu_screen = "bluetooth"
                     asyncio.create_task(bt.open_screen())
+                elif key == "other":
+                    menu_screen = "other"
                 elif key == "version":
                     updater.reset()
                     menu_screen = "version"
@@ -2030,6 +2193,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             if back.collidepoint(lx, ly):
                 updater.reset()
                 menu_screen = "main"
+        elif menu_screen == "other":
+            other_touch(lx, ly)
 
     frame_interval = 1.0 / TARGET_FPS
     start_mono = time.monotonic()   # for the startup road-safety notice
@@ -2215,6 +2380,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 draw_picker(screen, w, h, picker)
             elif menu_screen == "bluetooth":
                 draw_bluetooth(screen, w, h, bt)
+            elif menu_screen == "other":
+                draw_other(screen, w, h)
             elif menu_screen == "version":
                 draw_version(screen, w, h, bt, updater)
             else:
