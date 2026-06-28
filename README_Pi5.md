@@ -10,6 +10,31 @@ These instructions assume the Linux user `fuwenxu` and the install path
 username, see *Changing the username* in the main [README](README.md) and adjust
 the paths below.
 
+> ### If your username isn't `fuwenxu`
+>
+> **The Python code needs no edits** — it resolves `config.json`, `cache/`, and
+> `rejections.json` relative to the script itself
+> (`Path(__file__).resolve().parent`), so it runs from any path. The `fuwenxu`
+> strings inside the `.py` files are comments/example commands only.
+>
+> Only deployment details change. Substituting `pi5` as an example:
+>
+> | Where | Change | Required? |
+> |-------|--------|-----------|
+> | systemd unit `ExecStart` (Part E) | `/home/pi5/carlyrics/Lyrics_Display.py` | **Yes** — wrong path = service won't start |
+> | `carlyric-claude.sudoers` (Part D-3) | leading `fuwenxu` → `pi5` | Only if you use password-less restarts |
+> | clone path / `ssh` & `scp` host below | use your username + home dir | Yes (it's just where you log in / clone) |
+> | `wifi.sh` hint, `.py` docstrings | cosmetic | No |
+>
+> Fix the repo files in one pass (run from the repo root on the Pi, after Part C):
+>
+> ```bash
+> grep -rl fuwenxu . | xargs sed -i 's/fuwenxu/pi5/g'
+> ```
+>
+> The systemd unit lives in `/etc/systemd/system/` (outside the repo), so set its
+> path by hand in Part E.
+
 ---
 
 ## Hardware notes (Pi 5 vs. Pi Zero 2W)
