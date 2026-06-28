@@ -7,7 +7,7 @@ OS image you flash and a few physical details (HDMI port, power, cooling).
 
 These instructions assume the Linux user `fuwenxu` and the install path
 `~/carlyrics`, matching the rest of the project. If you use a different
-username, see *Changing the username* in the main [README](README.md) and adjust
+username, see *Changing the username* in [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) and adjust
 the paths below.
 
 > ### If your username isn't `fuwenxu`
@@ -286,7 +286,7 @@ A healthy boot still prints these — they are **not** the problem:
    Phone**.
 2. On your phone, pair with **`carlyric`** just like a Bluetooth speaker.
 3. Play a song — lyrics should scroll in sync. Tune offsets from the on-screen
-   menu or `config.json` (see the main README for every key).
+   menu or `config.json` (see [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) for every key).
 
 ---
 

@@ -57,7 +57,18 @@ that keeps your eyes on the road.
 
 ## Hardware
 
-- Raspberry Pi (developed on a Pi 4 / Pi OS Bookworm, 64-bit).
+> **Tested platform.** This project is tested and run **only on a Raspberry Pi
+> Zero 2W with Raspberry Pi OS _Lite_ (64-bit, no desktop).** Other Pi models and
+> images may work but are not validated. Use a **Lite / console-only** image: a
+> "with desktop" image runs its own Wayland compositor (labwc, via the display
+> manager) that holds the screen and fights `cage` for it, so the lyrics never
+> appear. If you must use a desktop image, switch the Pi to boot to console
+> (`sudo systemctl set-default multi-user.target`). For the Raspberry Pi 5,
+> follow the separate [README_Pi5.md](README_Pi5.md), which covers its extra
+> boot/seat quirks.
+
+- Raspberry Pi (developed on a Pi 4 / Pi OS Bookworm, 64-bit; **tested in-car on
+  a Pi Zero 2W with Pi OS Lite**).
 - A display — designed for a wide "bar" LCD (e.g. 1920×440), mounted above the
   dash. Works on any HDMI screen; set `flip_180` if it's mounted upside-down.
 - A touchscreen is optional but recommended — all on-screen controls
