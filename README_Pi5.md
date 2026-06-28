@@ -52,9 +52,17 @@ the paths below.
 
 ## Part A — Flash the OS
 
-**OS: Raspberry Pi OS (64-bit), Bookworm.** The "with desktop" image is fine.
-64-bit Bookworm is required on the Pi 5 (it uses the Wayland / `vc4-kms-v3d`
-graphics stack that `cage` needs).
+**OS: Raspberry Pi OS (64-bit) — use the _Lite_ image (no desktop).** 64-bit is
+required on the Pi 5 (it uses the `vc4-kms-v3d` graphics stack that `cage`
+needs).
+
+> ⚠️ **Do not use the "with desktop" image.** Its desktop (the `labwc` Wayland
+> compositor, auto-started by `lightdm`) grabs the HDMI output and holds DRM
+> master, so `cage` can never own the screen — you get an endless
+> `Swapchain for output 'HDMI-A-1' failed test` and a black display. `cage` is
+> our compositor; it must be the *only* one. If you already flashed the desktop
+> image, switch the Pi to boot to console instead of reflashing — see
+> *Pi 5 display gotchas* below.
 
 1. Install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>) on
    your computer and insert the microSD card.
@@ -91,6 +99,14 @@ sudo apt install -y python3-dbus-next python3-pygame fonts-noto-cjk \
 
 `cage` is the single-app Wayland kiosk compositor; `seatd` gives it a seat
 without a full desktop; `fonts-noto-cjk` provides Chinese glyphs.
+
+Enable `seatd` so it starts at boot (on the desktop image the login manager
+pulled it in for you; on Lite/console you must enable it yourself, or `cage`
+fails with a `libseat`/seat error):
+
+```bash
+sudo systemctl enable --now seatd
+```
 
 ---
 
@@ -142,11 +158,17 @@ Paste exactly (paths already set for user `fuwenxu`):
 ```ini
 [Unit]
 Description=Car Lyrics Display (cage + pygame scroller)
-After=bluetooth.service seatd.service
+After=systemd-user-sessions.service getty@tty1.service bluetooth.service
 Wants=bluetooth.service
+Conflicts=getty@tty1.service
 
 [Service]
 User=root
+PAMName=login
+TTYPath=/dev/tty1
+StandardInput=tty
+StandardOutput=journal
+StandardError=journal
 Environment=XDG_RUNTIME_DIR=/tmp
 ExecStart=/usr/bin/cage -s -- /usr/bin/python3 /home/fuwenxu/carlyrics/Lyrics_Display.py
 Restart=always
@@ -155,6 +177,15 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 ```
+
+> **Why the `tty1` binding matters (Pi 5).** At boot the kernel framebuffer
+> console owns the HDMI output (DRM master). A plain background service can't
+> take it, so `cage` starts but can never present — you'd see
+> `Could not make device fd drm master: Device or resource busy` and endless
+> `Swapchain … failed test`. `Conflicts=getty@tty1.service` + `TTYPath=/dev/tty1`
+> + `StandardInput=tty` + `PAMName=login` make `cage` the **active VT session on
+> `tty1`**, so the kernel hands it DRM master cleanly. Don't add any `WLR_*` env
+> vars — they're not needed and were a red herring on this hardware.
 
 Save (`Ctrl+O`, `Enter`, `Ctrl+X`), then enable and start:
 
@@ -167,6 +198,77 @@ journalctl -u carlyric.service -f      # watch it start
 A healthy start logs `[config] …` and `[display] <W> x <H>`, and the lyrics
 screen appears on the HDMI display. Press `Ctrl+C` to stop watching the log (the
 service keeps running).
+
+---
+
+## Pi 5 display gotchas
+
+Almost every "black screen / `Swapchain … failed test`" problem on the Pi 5 comes
+down to **something other than `cage` owning the HDMI output**. `cage` must be the
+only thing driving the display. In order of how often they bite:
+
+### 1. The desktop is stealing the screen (most common)
+
+If you flashed the **"with desktop"** image, `labwc` (the desktop's Wayland
+compositor, started by `lightdm`) holds DRM master and fights `cage`. Symptom:
+nonstop `Swapchain for output 'HDMI-A-1' failed test`, black screen.
+
+Check and fix — boot to console instead of the desktop:
+
+```bash
+systemctl get-default                 # if 'graphical.target', the desktop is on
+sudo systemctl set-default multi-user.target
+sudo systemctl enable --now seatd     # desktop used to start this for you
+sudo reboot
+```
+
+To confirm nothing else holds the GPU:
+
+```bash
+sudo fuser -v /dev/dri/card*          # should list only cage (+seatd), no labwc/Xorg
+```
+
+### 2. The console holds DRM master at boot
+
+Even with no desktop, the kernel framebuffer console owns `tty1` at boot, so a
+plain service can't get the display: `Could not make device fd drm master:
+Device or resource busy`. The **Part E unit fixes this** by binding `cage` to
+`tty1` (`Conflicts=getty@tty1.service`, `TTYPath`, `StandardInput=tty`,
+`PAMName=login`). If you wrote the unit without those lines, the manual run works
+but boot doesn't — add them.
+
+### 3. pygame / SDL picks the wrong video backend
+
+The app opens its window with `pygame.display.set_mode((0,0), FULLSCREEN)` and
+logs the result: `[display] <W> x <H> (SDL video driver: …)`.
+
+- **Correct:** `[display] 1920 x 440 (SDL video driver: x11)` — SDL runs through
+  cage's Xwayland. **Leave SDL on its default; do _not_ set
+  `SDL_VIDEODRIVER=wayland`.** On this trixie/SDL 2.32 build the native Wayland
+  driver either reports *"The video driver did not add any displays"* or hangs
+  forever inside `set_mode()` (black screen, only a cursor).
+- **`[display] 1 x 1`** — you're hitting gotcha #1 (a second compositor is up),
+  which corrupts Xwayland's screen size. Fix the desktop conflict, not SDL.
+
+### Harmless log lines (ignore these)
+
+A healthy boot still prints these — they are **not** the problem:
+
+- `[EGL] … eglQueryDeviceStringEXT … EGL_BAD_PARAMETER` — a query V3D doesn't support.
+- `xkbcomp … Unsupported maximum keycode 708, clipping` — keymap warning.
+- `xwayland/xwm.c … Failed to get window property` / `xcb error … ConfigureWindow` — cosmetic Xwayland startup noise.
+
+### Things that do *not* help (don't waste time)
+
+- **`WLR_DRM_NO_ATOMIC` / `WLR_DRM_NO_MODIFIERS` / `WLR_NO_HARDWARE_CURSORS`** —
+  these only *silence* the swapchain error; the output still never reaches the
+  app. The real cause is always "who owns the display," above.
+- **`WLR_RENDERER=vulkan`** — fails with `Could not match drm and vulkan device`
+  (the Pi splits display=vc4 and render=v3d into separate DRM devices).
+- **`WLR_RENDERER=pixman` / `SDL_VIDEODRIVER=kmsdrm`** — both fail to start here.
+- **Forcing an HDMI mode in `cmdline.txt`** (e.g. `video=HDMI-A-1:1920x1080@60`)
+  — the bar panel's native mode is **1920×440**; forcing a mode it can't show
+  gives a black screen. Let KMS pick the EDID mode; remove any `video=…` you added.
 
 ---
 
