@@ -161,7 +161,6 @@ Description=Car Lyrics Display (cage + pygame scroller)
 After=systemd-user-sessions.service getty@tty1.service bluetooth.service
 Wants=bluetooth.service
 Conflicts=getty@tty1.service
-OnSuccess=getty@tty1.service
 
 [Service]
 User=root
@@ -187,6 +186,14 @@ WantedBy=multi-user.target
 > + `StandardInput=tty` + `PAMName=login` make `cage` the **active VT session on
 > `tty1`**, so the kernel hands it DRM master cleanly. Don't add any `WLR_*` env
 > vars — they're not needed and were a red herring on this hardware.
+
+> **`Restart=on-failure` + the `Esc` key.** With a keyboard attached, `Esc`
+> exits the kiosk cleanly; `Restart=on-failure` then leaves it stopped (a real
+> crash still auto-recovers). Manage the Pi over SSH from there — VT switching
+> (`Ctrl+Alt+F2`) is blocked under cage on this board. **Do not add
+> `OnSuccess=getty@tty1.service`** to get a login prompt after `Esc`: it also
+> fires during every `systemctl restart`, which collides with the `tty1`
+> hand-off and **breaks "Update Firmware"** and manual restarts.
 
 Save (`Ctrl+O`, `Enter`, `Ctrl+X`), then enable and start:
 
