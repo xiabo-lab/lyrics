@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -2216,7 +2216,15 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     try:
         while True:
             for event in pygame.event.get():
-                if event.type in (pygame.QUIT, pygame.KEYDOWN):
+                # A real QUIT (window closed) or the Esc key exits cleanly; the
+                # systemd unit uses Restart=on-failure + OnSuccess=getty@tty1, so
+                # a clean Esc exit STAYS exited and drops to a login prompt on the
+                # screen (handy when no SSH and VT switching is blocked). Every
+                # OTHER key is ignored, so a stray keypress can't drop the kiosk
+                # (which under Restart it would relaunch, stealing the screen).
+                if event.type == pygame.QUIT or (
+                        event.type == pygame.KEYDOWN
+                        and event.key == pygame.K_ESCAPE):
                     return
                 if menu_screen is not None:
                     # Inside a menu, touches drive its buttons/sliders, not the

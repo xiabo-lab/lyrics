@@ -161,6 +161,7 @@ Description=Car Lyrics Display (cage + pygame scroller)
 After=systemd-user-sessions.service getty@tty1.service bluetooth.service
 Wants=bluetooth.service
 Conflicts=getty@tty1.service
+OnSuccess=getty@tty1.service
 
 [Service]
 User=root
@@ -171,7 +172,7 @@ StandardOutput=journal
 StandardError=journal
 Environment=XDG_RUNTIME_DIR=/tmp
 ExecStart=/usr/bin/cage -s -- /usr/bin/python3 /home/fuwenxu/carlyrics/Lyrics_Display.py
-Restart=always
+Restart=on-failure
 RestartSec=3
 
 [Install]
