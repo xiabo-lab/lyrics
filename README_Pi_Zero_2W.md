@@ -273,14 +273,28 @@ All gestures are tuned to be usable at a glance while driving.
   "This lyric has been deleted.", so a wrong cached match is dropped and
   re-searched the next time the song plays.
 - **Two-finger horizontal swipe** → nudges the sync for the *current song only*
-  (for the rare track whose master timing doesn't match the lyrics). Reset on
-  the next track.
+  (for the rare track whose master timing doesn't match the lyrics). The nudge
+  is live by default and resets on the next track — **but you can make it
+  permanent** by confirming with the Green button (see below).
 - **Green ✓ / Red ✗ edge buttons** → appear when fresh (uncached) lyrics load.
   **Green** confirms the match and caches it. **Red** opens a **picker** — a 3×3
   grid of up to 9 candidate versions gathered from *every* source (QQ, Kugou,
   NetEase, LRCLIB) for that song, each cell showing the song title and artist —
   tap the right one to switch to it. After a pick both buttons stay up (Red
   reopens the grid) until you confirm with **Green**.
+
+  **Saving a sync fix so it sticks:** if a song's timing is off, **swipe to fix
+  it first (two-finger horizontal swipe), _then_ press Green.** Green bakes
+  whatever sync adjustment is active at that moment into the saved lyrics, so
+  the song plays in sync automatically on every future play — you never have to
+  nudge it again, and the fix survives reboots and firmware updates.
+
+  > ⚠️ **Order matters — swipe first, then Green.** Pressing Green *before*
+  > swiping saves the un-adjusted timing, and once you press Green the buttons
+  > disappear, so a swipe afterwards won't be saved. You can swipe as many times
+  > as you need to dial it in, then press Green once. If you confirmed too early,
+  > **triple-tap** to delete the cached lyric, let it re-search, then
+  > swipe-then-Green.
 
 When nothing is playing (the phone has stopped, not just paused), the display
 falls back to an **idle clock** instead of a blank "waiting" note: the date
