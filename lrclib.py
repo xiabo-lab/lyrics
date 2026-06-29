@@ -79,6 +79,34 @@ def parse_lrc(lrc: str) -> list[LyricLine]:
     lines.sort(key=lambda l: l.time_ms)
     return lines
 
+def shift_lrc_timestamps(lrc: str, delta_ms: int) -> str:
+    """Return `lrc` with every [mm:ss.xx] timestamp shifted by `delta_ms`
+    (clamped at 0), re-emitted as [mm:ss.cc] centiseconds.
+
+    Used to *bake* a confirmed per-song sync nudge into the cached file so it
+    survives restarts: the live nudge (State.song_offset_ms) is added to the
+    playback clock, so saving timestamps shifted by -song_offset_ms reproduces
+    the same on-screen timing with no nudge on the next play.
+
+    Only real time tags (digits:digits) are touched; metadata like [ar:...],
+    [ti:...] or [offset:...] don't match the pattern and pass through unchanged.
+    """
+    if not delta_ms:
+        return lrc
+    import re
+    ts = re.compile(r"\[(\d+):(\d+)(?:\.(\d+))?\]")
+
+    def _shift(m) -> str:
+        mm, ss, frac = m.groups()
+        t = int(mm) * 60_000 + int(ss) * 1000
+        if frac:
+            t += int(frac.ljust(3, "0")[:3])
+        t = max(0, t + delta_ms)
+        return f"[{t // 60_000:02d}:{(t % 60_000) // 1000:02d}.{(t % 1000) // 10:02d}]"
+
+    return ts.sub(_shift, lrc)
+
+
 if __name__ == "__main__":
     # Test with a song that's reliably in LRCLIB.
     track = "Bohemian Rhapsody"

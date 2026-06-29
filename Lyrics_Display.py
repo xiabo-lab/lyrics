@@ -43,7 +43,7 @@ import requests
 from dbus_next import BusType, Variant
 from dbus_next.aio import MessageBus
 
-from lrclib import LyricLine, parse_lrc
+from lrclib import LyricLine, parse_lrc, shift_lrc_timestamps
 from lyric_sources import (
     delete_from_cache,
     fetch_synced_lyrics_any as fetch_synced_lyrics,
@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.5.8"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -1808,7 +1808,21 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         if green_rect.collidepoint(px, py):
             last_tap = now_t
             try:
-                save_to_cache(state.title, state.artist, state.lrc_raw)
+                # Bake any live per-song sync nudge into the saved timestamps so
+                # it survives restarts (shift by -song_offset_ms — see now_ms).
+                # Also rewrite the in-memory lines and zero the nudge so the
+                # currently-playing display is unchanged (shifted lines + 0
+                # offset == original lines + offset).
+                lrc_to_cache = state.lrc_raw
+                if state.song_offset_ms:
+                    lrc_to_cache = shift_lrc_timestamps(
+                        state.lrc_raw, -state.song_offset_ms)
+                    state.lrc_raw = lrc_to_cache
+                    state.lines = parse_lrc(lrc_to_cache)
+                    print(f"[feedback] baked sync {state.song_offset_ms:+d}ms "
+                          f"into cached lyrics")
+                    state.song_offset_ms = 0
+                save_to_cache(state.title, state.artist, lrc_to_cache)
                 print(f"[feedback] ✓ correct → cached ({state.lyrics_source})")
             except Exception as e:
                 print(f"[feedback] cache save failed: {e}")
