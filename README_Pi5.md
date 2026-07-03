@@ -1,9 +1,14 @@
 # carlyrics on Raspberry Pi 5
 
-Step-by-step setup for running the car lyric display on a **Raspberry Pi 5
-(8GB)** with a fresh microSD card. The application code is identical to the Pi
+Step-by-step setup for running the car lyric display on a **Raspberry Pi 5**,
+**tested on an 8GB board running the full Raspberry Pi OS (64-bit, "with
+desktop")** switched to console boot. The application code is identical to the Pi
 Zero 2W build — **no source changes are required.** The only differences are the
 OS image you flash and a few physical details (HDMI port, power, cooling).
+
+> **Running the Lite (console-only) image instead?** Follow the leaner
+> [README_Pi5_Lite.md](README_Pi5_Lite.md) — same result with fewer steps (there's
+> no desktop to switch off). This guide covers the full "with desktop" image.
 
 These instructions assume the Linux user `fuwenxu` and the install path
 `~/carlyrics`, matching the rest of the project. If you use a different
@@ -52,23 +57,23 @@ the paths below.
 
 ## Part A — Flash the OS
 
-**OS: Raspberry Pi OS (64-bit) — use the _Lite_ image (no desktop).** 64-bit is
-required on the Pi 5 (it uses the `vc4-kms-v3d` graphics stack that `cage`
-needs).
+**OS: Raspberry Pi OS (64-bit).** This guide is tested with the **full "with
+desktop"** image on a Pi 5 (8GB). 64-bit is required on the Pi 5 (it uses the
+`vc4-kms-v3d` graphics stack that `cage` needs).
 
-> ⚠️ **Do not use the "with desktop" image.** Its desktop (the `labwc` Wayland
-> compositor, auto-started by `lightdm`) grabs the HDMI output and holds DRM
-> master, so `cage` can never own the screen — you get an endless
-> `Swapchain for output 'HDMI-A-1' failed test` and a black display. `cage` is
-> our compositor; it must be the *only* one. If you already flashed the desktop
-> image, switch the Pi to boot to console instead of reflashing — see
-> *Pi 5 display gotchas* below.
+> ⚠️ **The desktop must not run at the same time as `cage`.** The desktop's
+> `labwc` Wayland compositor (auto-started by `lightdm`) grabs the HDMI output and
+> holds DRM master, so `cage` can never own the screen — you'd get an endless
+> `Swapchain for output 'HDMI-A-1' failed test` and a black display. `cage` must
+> be the *only* compositor, so **Step 7 below switches the Pi to boot to
+> console.** (Prefer to avoid this entirely? Use the Lite image and
+> [README_Pi5_Lite.md](README_Pi5_Lite.md).)
 
 1. Install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>) on
    your computer and insert the microSD card.
 2. In Imager:
    - **Device:** Raspberry Pi 5
-   - **OS:** Raspberry Pi OS (64-bit)
+   - **OS:** Raspberry Pi OS (64-bit)  *(the standard "with desktop" image)*
    - **Storage:** your microSD card
 3. Click **Next → Edit Settings** (the OS customization dialog) and set:
    - **Hostname:** `carlyric` (so `carlyric.local` resolves on the network)
@@ -85,6 +90,15 @@ needs).
    ```
 
    If `.local` doesn't resolve, use the Pi's IP from your router instead.
+7. **Switch to console boot** so the desktop compositor never fights `cage`:
+
+   ```bash
+   sudo systemctl set-default multi-user.target
+   sudo reboot
+   ```
+
+   After the reboot the Pi comes up to a console (no desktop). SSH back in and
+   continue with Part B.
 
 ---
 

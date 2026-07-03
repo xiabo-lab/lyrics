@@ -95,9 +95,39 @@ that keeps your eyes on the road.
 
 ---
 
-## Setup on the Pi
+## Part A — Flash the OS
 
-### 1. Dependencies
+**OS: Raspberry Pi OS (64-bit) — use the _Lite_ image (no desktop).** This is the
+tested platform: **Pi Zero 2W + Pi OS Lite**. A "with desktop" image runs its own
+Wayland compositor (`labwc`, via the display manager) that holds the screen and
+fights `cage`, so the lyrics never appear. If you must use a desktop image, switch
+the Pi to boot to console (`sudo systemctl set-default multi-user.target`).
+
+1. Install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>) and
+   insert the microSD card.
+2. In Imager:
+   - **Device:** Raspberry Pi Zero 2W
+   - **OS:** Raspberry Pi OS (other) → **Raspberry Pi OS Lite (64-bit)**
+   - **Storage:** your microSD card
+3. Click **Next → Edit Settings** (the OS customization dialog) and set:
+   - **Hostname:** `carlyric` (so `carlyric.local` resolves on the network)
+   - **Username:** `fuwenxu` + a password (keep `fuwenxu` to match the project's
+     paths, or see *Changing the username* below)
+   - **Wi-Fi:** your SSID, password, and country
+   - **Services tab:** enable **SSH** (password authentication)
+4. **Write** the card, insert it into the Pi, connect the HDMI display, and power
+   on.
+5. After ~1 minute, SSH in from your computer:
+
+   ```bash
+   ssh fuwenxu@carlyric.local
+   ```
+
+   If `.local` doesn't resolve, use the Pi's IP from your router instead.
+
+---
+
+## Part B — Install dependencies
 
 ```bash
 sudo apt update
@@ -108,7 +138,16 @@ sudo apt install -y python3-dbus-next python3-pygame fonts-noto-cjk \
 `cage` is a single-app Wayland kiosk compositor; `seatd` gives it a seat without
 a full desktop. `fonts-noto-cjk` is required for Chinese glyphs.
 
-### 2. Get the code
+Enable `seatd` so it starts at boot (on a Lite/console image you must enable it
+yourself, or `cage` fails with a `libseat`/seat error):
+
+```bash
+sudo systemctl enable --now seatd
+```
+
+---
+
+## Part C — Get the code
 
 Install `git` first, then clone:
 
@@ -122,37 +161,43 @@ git clone https://github.com/xiabo-lab/lyrics.git ~/carlyrics
 > user is different, change it — see
 > [Changing the username](#changing-the-username) below.
 
-### 3. Pair your phone (first time)
+---
 
-Bring up Bluetooth on the Pi, then pair from the phone exactly as you'd pair a
-Bluetooth speaker. After that, the app auto-connects on boot and you can pair
-*replacement* phones from the on-screen menu (see below). The Pi keeps only one
-phone paired at a time.
+## Part D — Install the support pieces
 
-For on-screen pairing to work, install the headless pairing agent — the Pi has
-no keyboard to confirm a pairing, so `bt-agent` (NoInputNoOutput) auto-accepts
-the "Just Works" pairing modern phones use:
+**1. Bluetooth auto-pairing agent** (lets you pair phones from the touchscreen —
+the Pi has no keyboard to confirm a pairing, so `bt-agent` (NoInputNoOutput)
+auto-accepts the "Just Works" pairing modern phones use):
 
 ```bash
 sudo cp ~/carlyrics/bt-agent.service /etc/systemd/system/
 sudo systemctl enable --now bt-agent
 ```
 
-### 4. Stop the stray cursor
-
-The phone's AVRCP control channel looks like a mouse to the compositor, which
-pops a cursor on screen. Install the udev rule to ignore it:
+**2. Stop the stray cursor** (the phone's AVRCP control channel looks like a
+mouse to the compositor, which pops a cursor on screen — this udev rule ignores
+it):
 
 ```bash
 sudo cp ~/carlyrics/99-carlyric-ignore-avrcp-pointer.rules /etc/udev/rules.d/
 sudo udevadm control --reload && sudo udevadm trigger
 ```
 
-### 5. Run it as a service
+**3. (Optional) password-less service restarts** (if you redeploy often, lets a
+non-root user restart the service without a password prompt — edit the username
+first):
+
+```bash
+sudo cp ~/carlyrics/carlyric-claude.sudoers /etc/sudoers.d/carlyric
+sudo chmod 440 /etc/sudoers.d/carlyric
+```
+
+---
+
+## Part E — Create the main service
 
 The GUI needs a graphical seat (cage), so it can't be launched over a plain SSH
-session — run it from systemd. Create `/etc/systemd/system/carlyric.service`
-(adjust the user and path to match your install):
+session — run it from systemd. Create the unit:
 
 ```bash
 sudo nano /etc/systemd/system/carlyric.service
@@ -187,6 +232,8 @@ Sanity-check the path if it's looping:
 grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home dir
 ```
 
+Then enable and start:
+
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now carlyric.service
@@ -196,26 +243,29 @@ journalctl -u carlyric.service -f      # watch it start
 A healthy start logs `[config] …`, `[display] <W> x <H>`, and on a track change
 `[track] <artist> — <title>` followed by a lyric source hit.
 
-**✅ That completes the required setup (steps 1–5)** — the lyrics display now
-starts on boot and reconnects your phone. Step 6 below and every section after it
-are **optional or reference**; skip them unless you need them.
+---
 
-### 6. (Optional) password-less restarts
+## Part F — Pair your phone & verify
 
-If you redeploy often, the sudoers snippet lets a non-root user restart the
-service without a password prompt (edit the username first):
+1. On the Pi screen, **long-press 10 s** → **Settings → Bluetooth → Pair New
+   Phone**.
+2. On your phone, pair with **`carlyric`** just like a Bluetooth speaker. This is
+   a one-time step — afterwards the app auto-connects on boot, and you can swap in
+   a *replacement* phone from this same menu (the Pi keeps one phone paired at a
+   time).
+3. Play a song — lyrics should scroll in sync. Tune offsets from the on-screen
+   menu or `config.json` (see *Configuration* below for every key).
 
-```bash
-sudo cp ~/carlyrics/carlyric-claude.sudoers /etc/sudoers.d/carlyric
-sudo chmod 440 /etc/sudoers.d/carlyric
-```
+**✅ That completes the required setup (Parts A–F)** — the lyrics display now
+starts on boot and reconnects your phone. Everything below is optional or
+reference; skip it unless you need it.
 
 ---
 
 # Reference & optional (skip unless you need it)
 
 Everything below is background, tuning reference, and troubleshooting — the
-display already works after steps 1–5 above. Read a section only when you need it.
+display already works after Parts A–F above. Read a section only when you need it.
 
 ## Changing the username
 
