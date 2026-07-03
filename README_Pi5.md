@@ -210,6 +210,22 @@ A healthy start logs `[config] …` and `[display] <W> x <H>`, and the lyrics
 screen appears on the HDMI display. Press `Ctrl+C` to stop watching the log (the
 service keeps running).
 
+> **After you press `Esc`, the local console looks broken — that's expected.**
+> Two things happen once `cage` releases the screen:
+>
+> - **Undervoltage messages** may scroll by, e.g. `hwmon hwmon3: Undervoltage
+>   detected!`. These were happening all along — `cage` just hid the console. They
+>   mean the Pi 5 isn't getting a full 5V/5A; fix the supply/cable (a 27W USB-C PD
+>   adapter + a 5A-rated cable). Check with `vcgencmd get_throttled` (`0x0` = fine,
+>   `0x10000` = undervoltage occurred since boot). Don't suppress the warning.
+> - **The keyboard does nothing.** The unit binds `tty1`
+>   (`Conflicts=getty@tty1.service`), so with `cage` stopped there is no login
+>   shell on `tty1`, and VT switching (`Ctrl+Alt+F2`) is blocked — by design you
+>   manage this Pi over **SSH**. Recover with `ssh fuwenxu@carlyric.local` then
+>   `sudo systemctl restart carlyric.service` (brings the display back), or
+>   `sudo systemctl start getty@tty1` for a local login prompt. No other computer?
+>   Power-cycle — it boots straight back into the display.
+
 ---
 
 ## Pi 5 display gotchas
