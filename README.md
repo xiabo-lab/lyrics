@@ -9,9 +9,10 @@ screen mounted in the car — no app on the phone, nothing to tap while driving.
 Pick the guide for your board:
 
 - **Raspberry Pi Zero 2W** (the tested platform) → **[README_Pi_Zero_2W.md](README_Pi_Zero_2W.md)**
-- **Raspberry Pi 5** → **[README_Pi5.md](README_Pi5.md)**
-- **Raspberry Pi 5 on Lite OS** (tested on Pi 5 1GB) → **[README_Pi5_Lite.md](README_Pi5_Lite.md)**
+- **Raspberry Pi 5 — full "with desktop" OS** (tested on Pi 5 8GB) → **[README_Pi5.md](README_Pi5.md)**
+- **Raspberry Pi 5 — Lite OS** (tested on Pi 5 1GB, fewer steps) → **[README_Pi5_Lite.md](README_Pi5_Lite.md)**
 
-> ⚠️ Use a Raspberry Pi OS **Lite** (console-only, 64-bit) image. A "with desktop"
-> image runs its own Wayland compositor (labwc) that holds the screen and fights
-> `cage`, so the lyrics never appear.
+> ⚠️ `cage` must be the only thing driving the screen. The **Lite** (console-only,
+> 64-bit) image gives that out of the box; on a "with desktop" image you switch
+> the Pi to boot to console (the Pi 5 full-OS guide covers this). Either way, if a
+> desktop compositor (labwc) keeps running, the lyrics never appear.
