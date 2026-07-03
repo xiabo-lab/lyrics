@@ -210,8 +210,29 @@ keeps running).
 grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home dir
 ```
 
-> **After you press `Esc`, the local console looks broken — that's expected.**
-> Two things happen once `cage` releases the screen:
+---
+
+## Part F — Pair your phone & verify
+
+1. On the Pi screen, **long-press 10 s** → **Settings → Bluetooth → Pair New
+   Phone**.
+2. On your phone, pair with **`carlyric`** just like a Bluetooth speaker.
+3. Play a song — lyrics should scroll in sync. Tune offsets from the on-screen
+   menu or `config.json` (see [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) for
+   every key).
+
+**✅ That completes the required setup (Parts A–F).** If the lyrics scroll in
+sync, you're done. **Everything below is optional or for troubleshooting only** —
+skip it unless something isn't working or you want to migrate settings.
+
+---
+
+# Optional & troubleshooting (skip unless you need it)
+
+## After you press `Esc` (expected behaviour, not a fault)
+
+> **The local console looks broken — that's expected.** Two things happen once
+> `cage` releases the screen:
 >
 > - **Undervoltage messages** may scroll by, e.g. `hwmon hwmon3: Undervoltage
 >   detected!`. These were happening all along — `cage` just hid the console. They
@@ -226,9 +247,7 @@ grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home
 >   `sudo systemctl start getty@tty1` for a local login prompt. No other computer?
 >   Power-cycle — it boots straight back into the display.
 
----
-
-## Display gotchas (Pi 5)
+## Display gotchas (Pi 5) — only if the screen is black or wrong
 
 Almost every "black screen / `Swapchain … failed test`" comes down to **something
 other than `cage` owning the HDMI output.** In order of how often they bite:
@@ -292,18 +311,7 @@ A healthy boot still prints these — they are **not** the problem:
 
 ---
 
-## Part F — Pair your phone & verify
-
-1. On the Pi screen, **long-press 10 s** → **Settings → Bluetooth → Pair New
-   Phone**.
-2. On your phone, pair with **`carlyric`** just like a Bluetooth speaker.
-3. Play a song — lyrics should scroll in sync. Tune offsets from the on-screen
-   menu or `config.json` (see [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) for
-   every key).
-
----
-
-## Part G — (Optional) Carry over tuning from another Pi
+## (Optional) Carry over tuning from another Pi
 
 To bring existing tuning and confirmed lyrics instead of starting blank, run from
 your computer with the other Pi powered on:
