@@ -196,6 +196,10 @@ journalctl -u carlyric.service -f      # watch it start
 A healthy start logs `[config] …`, `[display] <W> x <H>`, and on a track change
 `[track] <artist> — <title>` followed by a lyric source hit.
 
+**✅ That completes the required setup (steps 1–5)** — the lyrics display now
+starts on boot and reconnects your phone. Step 6 below and every section after it
+are **optional or reference**; skip them unless you need them.
+
 ### 6. (Optional) password-less restarts
 
 If you redeploy often, the sudoers snippet lets a non-root user restart the
@@ -207,6 +211,11 @@ sudo chmod 440 /etc/sudoers.d/carlyric
 ```
 
 ---
+
+# Reference & optional (skip unless you need it)
+
+Everything below is background, tuning reference, and troubleshooting — the
+display already works after steps 1–5 above. Read a section only when you need it.
 
 ## Changing the username
 
