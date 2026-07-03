@@ -110,7 +110,10 @@ a full desktop. `fonts-noto-cjk` is required for Chinese glyphs.
 
 ### 2. Get the code
 
+Install `git` first, then clone:
+
 ```bash
+sudo apt install git -y
 git clone https://github.com/xiabo-lab/lyrics.git ~/carlyrics
 ```
 
@@ -151,6 +154,16 @@ The GUI needs a graphical seat (cage), so it can't be launched over a plain SSH
 session — run it from systemd. Create `/etc/systemd/system/carlyric.service`
 (adjust the user and path to match your install):
 
+```bash
+sudo nano /etc/systemd/system/carlyric.service
+```
+
+Paste this exactly. **The paths below are for user `fuwenxu`. If your username is
+different, replace `fuwenxu` in the `ExecStart` line with your real username —
+never leave a `<pi-user>` placeholder there, or the service loops with
+`can't open file '/home/<pi-user>/carlyrics/Lyrics_Display.py': [Errno 2] No such
+file or directory`.**
+
 ```ini
 [Unit]
 Description=Car Lyrics Display (cage + pygame scroller)
@@ -160,12 +173,18 @@ Wants=bluetooth.service
 [Service]
 User=root
 Environment=XDG_RUNTIME_DIR=/tmp
-ExecStart=/usr/bin/cage -s -- /usr/bin/python3 /home/<pi-user>/carlyrics/Lyrics_Display.py
+ExecStart=/usr/bin/cage -s -- /usr/bin/python3 /home/fuwenxu/carlyrics/Lyrics_Display.py
 Restart=always
 RestartSec=3
 
 [Install]
 WantedBy=multi-user.target
+```
+
+Sanity-check the path if it's looping:
+
+```bash
+grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home dir
 ```
 
 ```bash

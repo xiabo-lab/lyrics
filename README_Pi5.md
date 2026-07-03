@@ -112,7 +112,10 @@ sudo systemctl enable --now seatd
 
 ## Part C — Get the code
 
+Install `git` first, then clone:
+
 ```bash
+sudo apt install git -y
 git clone https://github.com/xiabo-lab/lyrics.git ~/carlyrics
 cd ~/carlyrics
 ```
