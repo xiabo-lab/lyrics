@@ -245,7 +245,40 @@ A healthy start logs `[config] …`, `[display] <W> x <H>`, and on a track chang
 
 ---
 
-## Part F — Pair your phone & verify
+## Part F — Get the Pi online in the car (mobile hotspot)
+
+**Only needed for in-car / outdoor use.** The Pi fetches lyrics for *new* songs
+over the internet (songs you've already confirmed are cached and play offline). At
+home it's on the Wi-Fi you set in Part A; in the car it needs a mobile internet
+source. Set this up **once, parked**, and NetworkManager auto-connects whenever
+that network is in range — nothing to do per drive.
+
+- **Using a dedicated mobile hotspot (e.g. the TCL LINKPORT IK511 5G / T-Mobile)?**
+  Add its network to the Pi once (below) and you're set — it powers up with the
+  car and the Pi rejoins automatically. **Skip this part on future drives.**
+- **Using your phone's hotspot?** Add the phone's hotspot the same way; the Pi
+  then joins it whenever you turn Personal Hotspot on.
+
+Add the network from your computer over SSH while the Pi is still on your home
+Wi-Fi:
+
+```bash
+nano ~/carlyrics/wifi.sh    # set SSID and PASSWORD to the hotspot's
+~/carlyrics/wifi.sh         # asks for the sudo password; joins and saves it
+```
+
+NetworkManager remembers every network and auto-picks whichever known one is in
+range, so this is a one-time step per hotspot (this is the same `wifi.sh` covered
+under *Wi-Fi* below).
+
+> **The Pi Zero 2W is 2.4 GHz-only.** The hotspot must broadcast a **2.4 GHz**
+> band or the Zero won't see it. On iPhone, turn on **Settings → Personal Hotspot
+> → Maximize Compatibility** (forces 2.4 GHz); the TCL IK511 and most Android
+> hotspots already expose a 2.4 GHz SSID.
+
+---
+
+## Part G — Pair your phone & verify
 
 1. On the Pi screen, **long-press 10 s** → **Settings → Bluetooth → Pair New
    Phone**.
@@ -256,7 +289,7 @@ A healthy start logs `[config] …`, `[display] <W> x <H>`, and on a track chang
 3. Play a song — lyrics should scroll in sync. Tune offsets from the on-screen
    menu or `config.json` (see *Configuration* below for every key).
 
-**✅ That completes the required setup (Parts A–F)** — the lyrics display now
+**✅ That completes the required setup (Parts A–G)** — the lyrics display now
 starts on boot and reconnects your phone. Everything below is optional or
 reference; skip it unless you need it.
 
@@ -265,7 +298,7 @@ reference; skip it unless you need it.
 # Reference & optional (skip unless you need it)
 
 Everything below is background, tuning reference, and troubleshooting — the
-display already works after Parts A–F above. Read a section only when you need it.
+display already works after Parts A–G above. Read a section only when you need it.
 
 ## Changing the username
 

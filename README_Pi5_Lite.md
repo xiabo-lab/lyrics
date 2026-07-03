@@ -212,7 +212,37 @@ grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home
 
 ---
 
-## Part F — Pair your phone & verify
+## Part F — Get the Pi online in the car (mobile hotspot)
+
+**Only needed for in-car / outdoor use.** The Pi fetches lyrics for *new* songs
+over the internet (songs you've already confirmed are cached and play offline). At
+home it's on the Wi-Fi you set in Part A; in the car it needs a mobile internet
+source. Set this up **once, parked**, and NetworkManager auto-connects whenever
+that network is in range — nothing to do per drive.
+
+- **Using a dedicated mobile hotspot (e.g. the TCL LINKPORT IK511 5G / T-Mobile)?**
+  Add its network to the Pi once (below) and you're set — it powers up with the
+  car and the Pi rejoins automatically. **Skip this part on future drives.**
+- **Using your phone's hotspot?** Add the phone's hotspot the same way; the Pi
+  then joins it whenever you turn Personal Hotspot on.
+
+Add the network from your computer over SSH while the Pi is still on your home
+Wi-Fi:
+
+```bash
+nano ~/carlyrics/wifi.sh    # set SSID and PASSWORD to the hotspot's
+~/carlyrics/wifi.sh         # asks for the sudo password; joins and saves it
+```
+
+NetworkManager remembers every network and auto-picks whichever known one is in
+range, so this is a one-time step per hotspot.
+
+> **iPhone hotspot tip:** if the Pi won't join, toggle **Settings → Personal
+> Hotspot → Maximize Compatibility** on the phone and re-run `wifi.sh`.
+
+---
+
+## Part G — Pair your phone & verify
 
 1. On the Pi screen, **long-press 10 s** → **Settings → Bluetooth → Pair New
    Phone**.
@@ -221,7 +251,7 @@ grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home
    menu or `config.json` (see [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) for
    every key).
 
-**✅ That completes the required setup (Parts A–F).** If the lyrics scroll in
+**✅ That completes the required setup (Parts A–G).** If the lyrics scroll in
 sync, you're done. **Everything below is optional or for troubleshooting only** —
 skip it unless something isn't working or you want to migrate settings.
 
