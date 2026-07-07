@@ -32,6 +32,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import tarfile
 import tempfile
@@ -64,7 +65,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.9"
+APP_VERSION = "1.6.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -1155,6 +1156,99 @@ class FirmwareUpdater:
         raise RuntimeError(f"restart failed ({last})")
 
 
+class NetworkStatus:
+    """Read-only connectivity info for the Network screen (Settings → Network).
+
+    Answers "is the Pi online?" with three facts: the Wi-Fi SSID it joined, its
+    LAN IP, and whether the public internet is actually reachable. The
+    reachability probe is the one that matters — being associated to Wi-Fi
+    doesn't mean traffic flows — so we open a real TCP connection to GitHub,
+    which is exactly what OTA updates and lyric fetching depend on. A green
+    "Online" therefore means those features will work, not just "Wi-Fi is up".
+
+    All blocking work (subprocess + socket) runs in a worker thread; the render
+    loop reads the plain fields, and `busy` gates the Check-now button. Mirrors
+    FirmwareUpdater's threading model."""
+
+    # Probe GitHub specifically: it's what the OTA + several lyric sources hit,
+    # so its reachability is the connectivity that actually matters here. A full
+    # TCP connect exercises DNS + routing + handshake, unlike a bare ping.
+    PROBE_HOST = "github.com"
+    PROBE_PORT = 443
+    PROBE_TIMEOUT_S = 3.0
+
+    def __init__(self):
+        self.ssid = ""                  # "" → not on Wi-Fi (or name unknown)
+        self.ip = ""                    # "" → no IP address
+        self.online: bool | None = None  # None → not checked yet / checking
+        self.busy = False
+
+    async def refresh(self) -> None:
+        """(Re)collect SSID/IP and probe the internet. Guarded against re-entry
+        so a rapid double-tap on Check-now (or reopening the screen mid-check)
+        runs the probe once."""
+        if self.busy:
+            return
+        self.busy = True
+        self.online = None              # render shows "Checking…" meanwhile
+        try:
+            self.ssid, self.ip, self.online = await asyncio.to_thread(
+                self._collect)
+        except Exception as e:
+            print(f"[net] check failed: {e}")
+            self.ssid, self.ip, self.online = "", "", False
+        finally:
+            self.busy = False
+
+    @classmethod
+    def _collect(cls):
+        """Blocking: gather SSID, IP, and internet reachability."""
+        return cls._ssid(), cls._ip(), cls._probe()
+
+    @staticmethod
+    def _ssid() -> str:
+        """Current Wi-Fi SSID, or "" if not associated. iwgetid is lightest;
+        fall back to nmcli (already the tool wifi.sh uses)."""
+        for cmd in (["iwgetid", "-r"],
+                    ["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"]):
+            try:
+                out = subprocess.run(cmd, capture_output=True, text=True,
+                                     timeout=4).stdout.strip()
+            except Exception:
+                continue
+            if not out:
+                continue
+            if cmd[0] == "iwgetid":
+                return out
+            # nmcli: lines like "yes:MyNetwork" / "no:Other" — pick the active.
+            for line in out.splitlines():
+                if line.startswith("yes:"):
+                    return line[4:]
+        return ""
+
+    @staticmethod
+    def _ip() -> str:
+        """First IPv4 from `hostname -I` (space-separated), or "" if none."""
+        try:
+            out = subprocess.run(["hostname", "-I"], capture_output=True,
+                                 text=True, timeout=4).stdout.split()
+            if out:
+                return out[0]
+        except Exception:
+            pass
+        return ""
+
+    @classmethod
+    def _probe(cls) -> bool:
+        """True if a TCP connection to the probe host completes in time."""
+        try:
+            with socket.create_connection(
+                    (cls.PROBE_HOST, cls.PROBE_PORT), cls.PROBE_TIMEOUT_S):
+                return True
+        except OSError:
+            return False
+
+
 def decide_lock(real_ms, elapsed_s, fresh_max_ms, timeout_s):
     """Pure policy: should a just-read Position anchor a freshly-started
     track, and why? Returns (should_lock, reason).
@@ -1426,6 +1520,7 @@ MAIN_MENU_ITEMS = (
     ("font", "Font Settings"),
     ("bluetooth", "Bluetooth"),
     ("other", "Other Settings"),
+    ("network", "Network"),
     ("version", "Software Version"),
     ("close", "Close"),
 )
@@ -1565,6 +1660,57 @@ def draw_version(screen, w, h, bt: "BluetoothAdmin",
         s = small.render(updater.status, True, (255, 230, 150))
         screen.blit(s, s.get_rect(center=(w // 2, (update.bottom + back.top) // 2)))
     # Back button.
+    pygame.draw.rect(screen, (45, 45, 58), back, border_radius=14)
+    bl = btn_font.render("Back", True, (235, 235, 235))
+    screen.blit(bl, bl.get_rect(center=back.center))
+
+
+# ---- Network screen --------------------------------------------------------
+def _network_layout(w: int, h: int):
+    """Geometry for the Network screen: (check_btn, back_btn). Mirrors the
+    Version screen — two stacked full-width buttons with the info above."""
+    margin_x = max(20, int(w * 0.12))
+    bw = w - 2 * margin_x
+    bh = int(h * 0.15)
+    back = pygame.Rect(margin_x, h - int(h * 0.19), bw, bh)
+    check = pygame.Rect(margin_x, back.y - bh - max(12, int(h * 0.04)), bw, bh)
+    return check, back
+
+
+def draw_network(screen, w, h, net: "NetworkStatus") -> None:
+    """Wi-Fi SSID / IP / Internet status, a Check-now button and Back. The
+    Internet line is the headline answer to "is the Pi online?" and is colour-
+    coded (green online / red offline / amber checking). Drawn before FLIP_180."""
+    screen.fill(BG)
+    big = get_font(max(26, min(64, h // 11)), True)
+    small = get_font(max(16, min(32, h // 24)), False)
+    btn_font = get_font(max(20, min(42, h // 17)), True)
+
+    if net.online is None:
+        net_txt, net_col = "Checking…", (210, 200, 120)
+    elif net.online:
+        net_txt, net_col = "Online", (120, 210, 120)
+    else:
+        net_txt, net_col = "Offline", (225, 110, 110)
+
+    lines = [
+        big.render("Network", True, (235, 235, 235)),
+        small.render(f"Wi-Fi: {net.ssid or 'Not connected'}",
+                     True, (185, 185, 185)),
+        small.render(f"IP address: {net.ip or '—'}", True, (150, 150, 150)),
+        small.render(f"Internet: {net_txt}", True, net_col),
+    ]
+    y = int(h * 0.10)
+    for surf in lines:
+        screen.blit(surf, surf.get_rect(midtop=(w // 2, y)))
+        y += surf.get_height() + 12
+
+    check, back = _network_layout(w, h)
+    pygame.draw.rect(screen, (150, 110, 30) if net.busy else (40, 90, 140),
+                     check, border_radius=14)
+    c = btn_font.render("Checking…" if net.busy else "Check now",
+                        True, (255, 255, 255))
+    screen.blit(c, c.get_rect(center=check.center))
     pygame.draw.rect(screen, (45, 45, 58), back, border_radius=14)
     bl = btn_font.render("Back", True, (235, 235, 235))
     screen.blit(bl, bl.get_rect(center=back.center))
@@ -1880,7 +2026,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     #   "bluetooth"  → pair a new phone / forget paired phones
     #   "other"      → misc toggles/steppers (flip, A2DP/lyric offset, auto-dim)
     #   "version"    → read-only build info
+    #   "network"    → read-only connectivity (SSID / IP / online) + Check now
     menu_screen: str | None = None
+    net = NetworkStatus()        # connectivity for the Network screen
     settings_armed = False       # ignore touches until the opening hold lifts
     # A touch fires BOTH a FINGERDOWN and a synthesized MOUSEBUTTONDOWN; without
     # debouncing, every menu tap is handled twice — harmless for sliders/swatches
@@ -2191,6 +2339,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     asyncio.create_task(bt.open_screen())
                 elif key == "other":
                     menu_screen = "other"
+                elif key == "network":
+                    menu_screen = "network"
+                    asyncio.create_task(net.refresh())   # auto-check on open
                 elif key == "version":
                     updater.reset()
                     menu_screen = "version"
@@ -2223,6 +2374,13 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 return
             if back.collidepoint(lx, ly):
                 updater.reset()
+                menu_screen = "main"
+        elif menu_screen == "network":
+            check, back = _network_layout(w, h)
+            if check.collidepoint(lx, ly):
+                asyncio.create_task(net.refresh())   # re-check on demand
+                return
+            if back.collidepoint(lx, ly):
                 menu_screen = "main"
         elif menu_screen == "other":
             other_touch(lx, ly)
@@ -2423,6 +2581,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 draw_other(screen, w, h)
             elif menu_screen == "version":
                 draw_version(screen, w, h, bt, updater)
+            elif menu_screen == "network":
+                draw_network(screen, w, h, net)
             else:
                 # Night auto-dim × manual brightness, then max line width before
                 # shrink-to-fit (both honour live config changes).
