@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.7.0"
+APP_VERSION = "1.7.1"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -1389,26 +1389,38 @@ def _draw_progress(screen, w, curr_center, lines, idx, t_ms, bf):
                          border_radius=3)
 
 
-def _draw_feedback_buttons(screen, green_rect, red_rect):
+# Settled "no lyrics" outcomes where we still offer the RED bar (→ picker →
+# Modify Search) so the user can hand-search a song the automatic lookup missed.
+# Deliberately excludes the transient "Searching…/(fetching…)" states.
+NO_LYRIC_STATUSES = ("♪ Lyrics not found", "(network error)")
+
+
+def _draw_feedback_buttons(screen, green_rect, red_rect, green=True):
     """Translucent edge bars asking 'are these lyrics right?': a green ✓ strip
-    on the left, a red ✗ strip on the right. Drawn BEFORE the FLIP_180 flip so
-    they ride the same orientation correction as the lyrics (taps are inverted
-    to match — see render_loop). Kept to the edges so centered lyrics show
-    through on the wide bar display."""
-    for rect, fill in ((green_rect, (0, 160, 0, 120)),
-                       (red_rect, (200, 0, 0, 120))):
+    on the left, a red ✗ strip on the right. With green=False only the red ✗
+    bar is drawn — used when there are no lyrics to confirm but the user should
+    still be able to open the picker / Modify Search. Drawn BEFORE the FLIP_180
+    flip so they ride the same orientation correction as the lyrics (taps are
+    inverted to match — see render_loop). Kept to the edges so centered lyrics
+    show through on the wide bar display."""
+    fills = [(red_rect, (200, 0, 0, 120))]
+    if green:
+        fills.insert(0, (green_rect, (0, 160, 0, 120)))
+    for rect, fill in fills:
         bar = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
         bar.fill(fill)
         screen.blit(bar, rect.topleft)
     # Symbols sized/thickened off the (narrow) bar width, in solid WHITE for
     # contrast — a same-hue tint on a coloured bar was washing them out.
-    s = max(14, green_rect.w // 3)
-    lw = max(8, green_rect.w // 8)
+    s = max(14, red_rect.w // 3)
+    lw = max(8, red_rect.w // 8)
     white = (255, 255, 255)
-    # Green check mark.
-    gx, gy = green_rect.center
-    pygame.draw.lines(screen, white, False,
-                      [(gx - s, gy), (gx - s // 3, gy + s), (gx + s, gy - s)], lw)
+    if green:
+        # Green check mark.
+        gx, gy = green_rect.center
+        pygame.draw.lines(screen, white, False,
+                          [(gx - s, gy), (gx - s // 3, gy + s), (gx + s, gy - s)],
+                          lw)
     # Red cross.
     rx, ry = red_rect.center
     pygame.draw.line(screen, white, (rx - s, ry - s), (rx + s, ry + s), lw)
@@ -2405,6 +2417,16 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         # invert the tap to land in the same logical space as the buttons.
         if FLIP_180:
             px, py = w - 1 - px, h - 1 - py
+        # No-lyric case: only the RED bar is up (see draw), so a RED tap opens
+        # the picker/Modify Search and nothing else is interactive.
+        no_lyric = (state.title and not state.lines
+                    and state.lyrics_status in NO_LYRIC_STATUSES)
+        if no_lyric:
+            if red_rect.collidepoint(px, py):
+                last_tap = now_t
+                print("[feedback] no lyrics → opening picker for manual search")
+                asyncio.create_task(open_picker())
+            return
         if not (state.awaiting_feedback and state.lines):
             return
         if green_rect.collidepoint(px, py):
@@ -2551,13 +2573,12 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         # A track change during the sweep makes these results stale — drop them.
         if (state.title, state.artist) != sig:
             return
-        if cands:
-            picker_cache, picker_cache_sig, picker = cands, sig, cands
-            fingers.clear()      # drop the RED-tap finger so it can't linger
-            print(f"[picker] showing {len(cands)} candidate(s)")
-        else:
-            state.lyrics_status = "♪ No other versions found"
-            print("[picker] no candidates found")
+        # Show the grid even with ZERO results: the empty cells read faint and
+        # the Modify Search button is always present, so the user can still edit
+        # the query and re-search a song the automatic lookup missed.
+        picker_cache, picker_cache_sig, picker = cands, sig, cands
+        fingers.clear()          # drop the RED-tap finger so it can't linger
+        print(f"[picker] showing {len(cands)} candidate(s)")
 
     def select_candidate(i: int) -> None:
         """Tap on a grid cell: show that candidate's lyrics and keep BOTH
@@ -3001,6 +3022,13 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                     open_editor()
                                 elif i < len(picker):
                                     select_candidate(i)
+                                else:
+                                    # An empty result cell → dismiss the grid
+                                    # back to lyrics. This is the only way out
+                                    # when a search returned nothing (no
+                                    # candidate to tap), so the user isn't
+                                    # trapped on an empty grid.
+                                    picker = None
                                 break
                     continue
                 # Touch: SDL delivers FINGERDOWN (normalized 0..1 coords) and,
@@ -3205,6 +3233,11 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 # flip so the buttons orient with the lyrics.
                 if state.awaiting_feedback and state.lines:
                     _draw_feedback_buttons(screen, green_rect, red_rect)
+                # No lyrics were found for this song → still offer RED alone so
+                # the user can open the picker / Modify Search and hand-search.
+                elif state.title and state.lyrics_status in NO_LYRIC_STATUSES:
+                    _draw_feedback_buttons(screen, green_rect, red_rect,
+                                           green=False)
 
                 # Brightness slider (double-tap to toggle). Drawn at full
                 # intensity — NOT scaled by bf — so it stays visible even when
