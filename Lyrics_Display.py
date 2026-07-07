@@ -48,8 +48,10 @@ from lrclib import LyricLine, parse_lrc, shift_lrc_timestamps
 from lyric_sources import (
     delete_from_cache,
     fetch_synced_lyrics_any as fetch_synced_lyrics,
+    get_alias,
     save_to_cache,
     search_candidates,
+    set_alias,
 )
 
 # Silence pygame ALSA warnings — we don't need audio out.
@@ -65,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -79,6 +81,8 @@ UPDATE_FILES = (
     "Lyrics_Display.py", "lyric_sources.py", "lrclib.py", "test_lyrics.py",
     "bt-agent.service", "99-carlyric-ignore-avrcp-pointer.rules",
     "wifi.sh", "carlyric-claude.sudoers", "README.md", "LICENSE", ".gitignore",
+    # Pinyin IME data table + its generator (Modify Search → 中 mode).
+    "pinyin_table.json", "build_pinyin_table.py",
 )
 UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
@@ -359,6 +363,12 @@ class State:
     def __init__(self):
         self.title: str = ""
         self.artist: str = ""
+        # The UNMODIFIED title/artist the phone last reported over AVRCP. When a
+        # user renames via the picker's Modify Search, title/artist above hold
+        # the corrected (display) name, while these keep the phone's original so
+        # the alias can be keyed by what the phone will report again next play.
+        self.raw_title: str = ""
+        self.raw_artist: str = ""
         self.status: str = "stopped"        # "playing" | "paused" | "stopped"
         self.position_ms: int = 0
         self.position_at_mono: float = time.monotonic()
@@ -732,6 +742,14 @@ class AvrcpWatcher:
             sig = (title, artist)
             if sig != self.last_sig and title and artist:
                 self.last_sig = sig
+                # Dedup on the phone's RAW report (last_sig above), but display
+                # + fetch under any user-set correction so a renamed song stays
+                # renamed on every future play and hits its cache.
+                self.state.raw_title, self.state.raw_artist = title, artist
+                alias = get_alias(title, artist)
+                if alias:
+                    title, artist = alias["title"], alias["artist"]
+                    print(f"[alias] {sig} → {artist} — {title}")
                 self.state.title = title
                 self.state.artist = artist
                 self.state.lines = []
@@ -1398,10 +1416,16 @@ def _draw_feedback_buttons(screen, green_rect, red_rect):
 
 
 # ---- Source picker (RED button → 3x3 candidate grid) -----------------------
+# 8 result cells (0-7) + the lower-right cell (8) is the "Modify Search" button
+# that opens the edit-and-re-search screen.
+MODIFY_SEARCH_CELL = 8
+
+
 def _picker_layout(w: int, h: int):
     """A fixed 3x3 grid of candidate cells, row-major, in LOGICAL (pre-FLIP_180)
     pixels. Shared by the draw pass and the touch hit-test so they never drift.
-    Always 9 cells; empties are drawn faint when there are fewer candidates."""
+    Cells 0-7 hold candidates; cell 8 (lower-right) is the Modify Search button.
+    Empty result cells are drawn faint when there are fewer than 8 candidates."""
     cols = rows = 3
     mx = max(16, int(w * 0.03))
     top = max(12, int(h * 0.03))
@@ -1444,6 +1468,17 @@ def draw_picker(screen, w, h, candidates) -> None:
     sub_font = get_font(max(20, min(46, int(cell_h * 0.27))), False)
     gap = max(4, cell_h // 16)
     for i, rect in enumerate(cells):
+        if i == MODIFY_SEARCH_CELL:
+            # Lower-right cell: the Modify Search button (always shown).
+            pygame.draw.rect(screen, (40, 90, 140), rect, border_radius=12)
+            l1 = sub_font.render("Modify", True, (255, 255, 255))
+            l2 = sub_font.render("Search", True, (255, 255, 255))
+            block_h = l1.get_height() + gap + l2.get_height()
+            y0 = rect.y + (rect.h - block_h) // 2
+            screen.blit(l1, l1.get_rect(midtop=(rect.centerx, y0)))
+            screen.blit(l2, l2.get_rect(
+                midtop=(rect.centerx, y0 + l1.get_height() + gap)))
+            continue
         if i >= len(candidates):
             pygame.draw.rect(screen, (30, 30, 38), rect, border_radius=12)
             continue
@@ -1460,6 +1495,415 @@ def draw_picker(screen, w, h, candidates) -> None:
         screen.blit(ts, ts.get_rect(midtop=(rect.centerx, y0)))
         screen.blit(a_s, a_s.get_rect(
             midtop=(rect.centerx, y0 + ts.get_height() + gap)))
+
+
+# ---- Pinyin IME (Modify Search → 中 mode) ----------------------------------
+class PinyinIME:
+    """Offline pinyin→Hanzi conversion for the Modify Search keyboard.
+
+    Loads `pinyin_table.json` (built by build_pinyin_table.py, shipped via OTA)
+    once, lazily. Given a raw pinyin buffer it returns tappable candidates as
+    (hanzi, consume_len) — consume_len is how many buffer letters that choice
+    eats, so a whole-word pick clears the buffer while a single-char pick eats
+    just its leading syllable. Everything is dict lookups + a greedy syllable
+    segmentation; no network, no heavy deps."""
+
+    TABLE = INSTALL_DIR / "pinyin_table.json"
+    MAX_SYL = 6            # longest pinyin syllable (e.g. "zhuang", "shuang")
+
+    def __init__(self):
+        self._loaded = False
+        self.chars: dict = {}      # syllable → ranked Hanzi string
+        self.words: dict = {}      # concatenated pinyin → [words]
+        self._syls: set = set()
+
+    def _ensure(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        try:
+            data = json.loads(self.TABLE.read_text(encoding="utf-8"))
+            self.chars = data.get("chars", {})
+            self.words = data.get("words", {})
+            self._syls = set(self.chars)
+            print(f"[ime] loaded {len(self.chars)} syllables, "
+                  f"{len(self.words)} word keys")
+        except Exception as e:
+            print(f"[ime] table load failed: {e}")
+
+    def available(self) -> bool:
+        self._ensure()
+        return bool(self.chars)
+
+    def segment(self, comp: str) -> list[str]:
+        """Greedy longest-match split of a pinyin buffer into syllables; an
+        unrecognised letter becomes its own 1-char segment."""
+        self._ensure()
+        out: list[str] = []
+        i, n = 0, len(comp)
+        while i < n:
+            hit = None
+            for j in range(min(self.MAX_SYL, n - i), 0, -1):
+                if comp[i:i + j] in self._syls:
+                    hit = comp[i:i + j]
+                    break
+            if hit:
+                out.append(hit)
+                i += len(hit)
+            else:
+                out.append(comp[i])
+                i += 1
+        return out
+
+    def candidates(self, comp: str, limit: int = 9) -> list[tuple[str, int]]:
+        """Ranked (hanzi, consume_len) for a pinyin buffer: whole-buffer words
+        first, then leading multi-syllable words, then single chars for the
+        first syllable."""
+        self._ensure()
+        out: list[tuple[str, int]] = []
+        seen: set = set()
+
+        def add(h: str, consume: int) -> None:
+            if h and (h, consume) not in seen:
+                seen.add((h, consume))
+                out.append((h, consume))
+
+        for word in self.words.get(comp, []):
+            add(word, len(comp))
+        segs = self.segment(comp)
+        for nseg in range(len(segs), 1, -1):          # longest leading group first
+            key = "".join(segs[:nseg])
+            if key == comp:
+                continue
+            for word in self.words.get(key, []):
+                add(word, len(key))
+        if segs and segs[0] in self._syls:
+            for ch in self.chars.get(segs[0], ""):
+                add(ch, len(segs[0]))
+        return out[:limit]
+
+
+_PINYIN = PinyinIME()
+
+
+# ---- Modify Search editor (RED grid → Modify Search) -----------------------
+# On-screen QWERTY to correct a garbled/wrong artist/song and re-search. A 中/A
+# key toggles a pinyin→Hanzi IME (Phase 2) that surfaces a candidate strip. Left
+# column shows the two editable fields + Search + Back; the keyboard fills right.
+class SearchEditor:
+    """Editing state for the Modify Search screen.
+
+    Holds the working artist/title text, which field is active (tapped), and a
+    one-shot Shift. orig_sig is the phone's ORIGINAL (raw) artist/title so a
+    Search can persist the correction as an alias keyed to what the phone will
+    report next play."""
+
+    def __init__(self, title: str, artist: str, orig_sig: tuple):
+        self.title = title
+        self.artist = artist
+        self.orig_sig = orig_sig     # (raw_title, raw_artist)
+        self.active = "artist"       # which field the keyboard types into
+        self.shift = False
+        self.cursor = len(artist)    # caret index within the active field
+        self.pinyin_mode = False     # 中 mode: letters compose Hanzi
+        self.comp = ""               # raw pinyin buffer while composing
+        self.cand_page = 0           # current candidate page (paged strip)
+
+    def _get(self) -> str:
+        return self.title if self.active == "title" else self.artist
+
+    def _set(self, v: str) -> None:
+        if self.active == "title":
+            self.title = v
+        else:
+            self.artist = v
+
+    def _set_comp(self, v: str) -> None:
+        """Set the pinyin buffer and reset paging (candidates changed)."""
+        self.comp = v
+        self.cand_page = 0
+
+    def set_active(self, field: str) -> None:
+        """Focus a field (from a tap) and drop the caret at its end. Any pending
+        pinyin composition is discarded."""
+        self.active = field
+        self.cursor = len(self._get())
+        self._set_comp("")
+
+    def insert_text(self, s: str) -> None:
+        """Insert s at the caret and advance the caret past it."""
+        cur = self._get()
+        i = max(0, min(self.cursor, len(cur)))
+        self._set(cur[:i] + s + cur[i:])
+        self.cursor = i + len(s)
+
+    def select_candidate(self, hanzi: str, consume: int) -> None:
+        """Commit a chosen candidate: insert it and drop the pinyin it used."""
+        self.insert_text(hanzi)
+        self._set_comp(self.comp[consume:])
+
+    def commit_first(self) -> None:
+        """Commit the top candidate (Space in 中 mode); if none, drop the raw
+        pinyin in as-is so the buffer never gets stuck."""
+        cands = _PINYIN.candidates(self.comp)
+        if cands:
+            self.select_candidate(*cands[0])
+        else:
+            self.insert_text(self.comp)
+            self._set_comp("")
+
+    def apply_key(self, action: str) -> None:
+        """action: a single character to insert at the caret, or 'toggle' /
+        'shift' / 'left' / 'right' / 'space' / 'back' / 'clear'. In 中 mode,
+        letters build a pinyin buffer and digits 1-9 pick a candidate."""
+        if action == "toggle":
+            if not self.pinyin_mode and not _PINYIN.available():
+                return                       # no table → stay in Latin mode
+            self.pinyin_mode = not self.pinyin_mode
+            self._set_comp("")
+            self.shift = False
+            return
+        # ---- 中 mode: intercept keys that drive composition ------------------
+        if self.pinyin_mode:
+            if len(action) == 1 and action.isalpha():
+                self._set_comp(self.comp + action.lower())
+                return
+            if self.comp:
+                # Composing: keys act on the buffer, not the field. Candidates
+                # are chosen by TAP (« » page through them), so number/arrow
+                # keys are swallowed here rather than leaking into the field.
+                if action == "space":
+                    self.commit_first()
+                elif action == "back":
+                    self._set_comp(self.comp[:-1])
+                elif action == "clear":
+                    self._set_comp("")
+                return
+            # else: buffer empty → fall through to normal field editing
+        # ---- Latin field editing --------------------------------------------
+        if action == "shift":
+            self.shift = not self.shift
+            return
+        cur = self._get()
+        i = max(0, min(self.cursor, len(cur)))   # clamp (field may have changed)
+        if action == "left":
+            self.cursor = max(0, i - 1)
+            return
+        if action == "right":
+            self.cursor = min(len(cur), i + 1)
+            return
+        if action == "back":
+            if i > 0:
+                self._set(cur[:i - 1] + cur[i:])
+                self.cursor = i - 1
+        elif action == "clear":
+            self._set("")
+            self.cursor = 0
+        elif action == "space":
+            self._set(cur[:i] + " " + cur[i:])
+            self.cursor = i + 1
+        elif len(action) == 1:
+            ch = action.upper() if self.shift else action
+            self._set(cur[:i] + ch + cur[i:])
+            self.cursor = i + 1
+            self.shift = False       # Shift is one-shot, like a phone keyboard
+
+
+# Keyboard rows (lowercase; Shift renders/inserts uppercase). Bottom row is a
+# set of (label, action, width-units) specials.
+_KB_ROWS = ("1234567890", "qwertyuiop", "asdfghjkl", "zxcvbnm")
+# "中/A" label is replaced at draw time by the live mode (中 / A).
+_KB_BOTTOM = (("中/A", "toggle", 1.7), ("Shift", "shift", 1.4),
+              ("←", "left", 1.0), ("→", "right", 1.0), ("Space", "space", 2.6),
+              ("Del", "back", 1.3), ("Clear", "clear", 1.5))
+
+
+def _editor_keys(box: "pygame.Rect"):
+    """Build [(label, rect, action), ...] for the keyboard inside box."""
+    keys = []
+    n_rows = len(_KB_ROWS) + 1
+    gy = max(4, box.h // 40)
+    kh = (box.h - (n_rows - 1) * gy) // n_rows
+    y = box.y
+    for row in _KB_ROWS:
+        n = len(row)
+        gx = max(4, box.w // 60)
+        kw = (box.w - (n - 1) * gx) // n
+        row_w = n * kw + (n - 1) * gx
+        x = box.x + (box.w - row_w) // 2      # centre the row
+        for ch in row:
+            keys.append((ch, pygame.Rect(x, y, kw, kh), ch))
+            x += kw + gx
+        y += kh + gy
+    # Bottom row: proportional widths from the width-units.
+    gx = max(4, box.w // 60)
+    total_u = sum(u for _l, _a, u in _KB_BOTTOM)
+    avail = box.w - (len(_KB_BOTTOM) - 1) * gx
+    x = box.x
+    for label, action, u in _KB_BOTTOM:
+        kw = int(avail * (u / total_u))
+        keys.append((label, pygame.Rect(x, y, kw, kh), action))
+        x += kw + gx
+    return keys
+
+
+def _editor_layout(w: int, h: int):
+    """Geometry for the Modify Search screen, LOGICAL (pre-FLIP_180) px.
+    Returns {"back","artist","title","search","compbar","keys"}. The compbar is
+    a strip above the keyboard that holds the pinyin buffer + candidates in 中
+    mode; it's always reserved so the keyboard never jumps when toggling."""
+    mx = max(16, int(w * 0.03))
+    my = max(12, int(h * 0.05))
+    lw = int(w * 0.40)                        # left column width
+    back = pygame.Rect(mx, my, int(lw * 0.5), int(h * 0.11))
+    field_h = int(h * 0.17)
+    gap = max(10, int(h * 0.035))
+    artist = pygame.Rect(mx, back.bottom + gap, lw, field_h)
+    title = pygame.Rect(mx, artist.bottom + gap, lw, field_h)
+    search = pygame.Rect(mx, title.bottom + gap, lw, int(h * 0.15))
+    kx = mx + lw + max(16, int(w * 0.03))
+    kw = w - kx - mx
+    kh_total = h - 2 * my
+    comp_h = int(kh_total * 0.13)
+    compbar = pygame.Rect(kx, my, kw, comp_h)
+    kb = pygame.Rect(kx, my + comp_h + max(6, int(h * 0.012)),
+                     kw, kh_total - comp_h - max(6, int(h * 0.012)))
+    return {"back": back, "artist": artist, "title": title, "search": search,
+            "compbar": compbar, "keys": _editor_keys(kb)}
+
+
+def _ime_layout(compbar: "pygame.Rect", comp: str, page: int = 0):
+    """Shared by draw + hit-test. Given the compbar, the pinyin buffer, and a
+    page index, return (font, label, cand_rects, prev_rect, next_rect, n_pages,
+    page). label is the raw pinyin (syllables joined by '); cand_rects are the
+    tappable candidates for THIS page; prev/next_rect are the « » page buttons
+    (drawn only when n_pages > 1). Candidates pack left-to-right; when they'd
+    overflow the row a new page begins, so every candidate is reachable."""
+    f = get_font(max(16, min(34, int(compbar.h * 0.58))), True)
+    pad = max(6, compbar.h // 6)
+    gap = max(4, pad // 2)
+    y, kh = compbar.y + 3, compbar.h - 6
+    segs = _PINYIN.segment(comp) if comp else []
+    label = "'".join(segs) if segs else comp
+    label_w = (f.size(label)[0] + 2 * pad) if comp else 0
+    cands = _PINYIN.candidates(comp, limit=200) if comp else []
+    nav_w = f.size("«")[0] + 2 * pad
+    left = compbar.x + pad + label_w + pad
+    # Always reserve the two nav buttons on the right so the row width — and
+    # thus the pagination — is stable whether or not nav ends up shown.
+    region_w = max(10, (compbar.right - pad - 2 * (nav_w + gap)) - left)
+    # Pack candidates greedily into pages.
+    pages, i, n = [], 0, len(cands)
+    while i < n:
+        x, start = 0, i
+        while i < n:
+            cw = f.size(cands[i][0])[0] + 2 * pad
+            need = cw if i == start else cw + gap
+            if x + need > region_w and i > start:
+                break
+            x += need
+            i += 1
+        pages.append((start, i))
+    n_pages = max(1, len(pages))
+    pg = max(0, min(page, n_pages - 1))
+    rects = []
+    if pages:
+        s, e = pages[pg]
+        x = left
+        for k in range(s, e):
+            hanzi, consume = cands[k]
+            cw = f.size(hanzi)[0] + 2 * pad
+            rects.append((hanzi, consume, pygame.Rect(x, y, cw, kh)))
+            x += cw + gap
+    prev_rect = pygame.Rect(compbar.right - pad - 2 * nav_w - gap, y, nav_w, kh)
+    next_rect = pygame.Rect(compbar.right - pad - nav_w, y, nav_w, kh)
+    return f, label, rects, prev_rect, next_rect, n_pages, pg
+
+
+def draw_search_editor(screen, w, h, ed: "SearchEditor") -> None:
+    """Left: Artist/Song fields (tap to focus, active one outlined + cursor),
+    Search, Back. Right: QWERTY keyboard. Drawn before the FLIP_180 flip."""
+    screen.fill(BG)
+    lay = _editor_layout(w, h)
+    cap_font = get_font(max(13, min(24, h // 32)), False)
+    field_font = get_font(max(20, min(40, h // 16)), True)
+    btn_font = get_font(max(16, min(30, h // 22)), True)
+    key_font = get_font(max(16, min(34, h // 20)), True)
+
+    # Back
+    pygame.draw.rect(screen, (45, 45, 58), lay["back"], border_radius=10)
+    bl = btn_font.render("Back", True, (235, 235, 235))
+    screen.blit(bl, bl.get_rect(center=lay["back"].center))
+
+    # Fields
+    for fld, rect, text, cap in (("artist", lay["artist"], ed.artist, "Artist"),
+                                 ("title", lay["title"], ed.title, "Song")):
+        active = ed.active == fld
+        pygame.draw.rect(screen, (60, 60, 82) if active else (40, 40, 52),
+                         rect, border_radius=10)
+        pygame.draw.rect(screen, (120, 170, 240) if active else (70, 70, 86),
+                         rect, width=max(2, h // 320), border_radius=10)
+        cs = cap_font.render(cap, True, (150, 150, 165))
+        screen.blit(cs, (rect.x + 12, rect.y + 6))
+        # Show a caret at the cursor position (active field only) by inserting a
+        # literal '|' there, so ◀/▶ visibly move it within the text.
+        if active:
+            i = max(0, min(ed.cursor, len(text)))
+            text = text[:i] + "|" + text[i:]
+        shown = _fit_text(text, field_font, rect.w - 28)
+        ts = field_font.render(shown, True, (245, 245, 245))
+        screen.blit(ts, (rect.x + 14,
+                         rect.centery - ts.get_height() // 2 + cs.get_height() // 2))
+
+    # Search (below the Song field). Song name is required; artist is optional
+    # so the user can search by title alone.
+    ready = bool(ed.title.strip())
+    pygame.draw.rect(screen, (40, 120, 50) if ready else (45, 55, 46),
+                     lay["search"], border_radius=12)
+    ss = btn_font.render("Search", True,
+                         (255, 255, 255) if ready else (150, 160, 150))
+    screen.blit(ss, ss.get_rect(center=lay["search"].center))
+
+    # Composition bar (中 mode): raw pinyin on the left, tappable candidates
+    # after it. Drawn faint when idle so the reserved space reads as part of the
+    # keyboard rather than a gap.
+    cb = lay["compbar"]
+    if ed.pinyin_mode:
+        pygame.draw.rect(screen, (38, 38, 50), cb, border_radius=8)
+        f, label, cands, prev_r, next_r, n_pages, pg = _ime_layout(
+            cb, ed.comp, ed.cand_page)
+        pad = max(6, cb.h // 6)
+        if ed.comp:
+            ps = f.render(label, True, (255, 220, 120))
+            screen.blit(ps, (cb.x + pad, cb.centery - ps.get_height() // 2))
+            for hanzi, _consume, rect in cands:
+                pygame.draw.rect(screen, (60, 60, 78), rect, border_radius=6)
+                hs = f.render(hanzi, True, (245, 245, 245))
+                screen.blit(hs, hs.get_rect(center=rect.center))
+            if n_pages > 1:                    # « page » nav + "p/N" indicator
+                for r, glyph in ((prev_r, "«"), (next_r, "»")):
+                    pygame.draw.rect(screen, (70, 70, 90), r, border_radius=6)
+                    gs = f.render(glyph, True, (235, 235, 235))
+                    screen.blit(gs, gs.get_rect(center=r.center))
+                idx = get_font(max(11, min(20, cb.h // 5)), False).render(
+                    f"{pg + 1}/{n_pages}", True, (150, 150, 165))
+                screen.blit(idx, idx.get_rect(
+                    midbottom=(prev_r.left - pad, prev_r.bottom)))
+
+    # Keyboard
+    for label, rect, action in lay["keys"]:
+        lit = (action == "shift" and ed.shift) or (
+            action == "toggle" and ed.pinyin_mode)
+        pygame.draw.rect(screen, (95, 95, 60) if lit else (55, 55, 70),
+                         rect, border_radius=8)
+        if action == "toggle":
+            disp = "中" if ed.pinyin_mode else "A"
+        elif len(action) == 1 and action.isalpha():
+            disp = action.upper() if ed.shift else action
+        else:
+            disp = label
+        kl = key_font.render(disp, True, (235, 235, 235))
+        screen.blit(kl, kl.get_rect(center=rect.center))
 
 
 def draw_safety(screen, w, h, remaining: float) -> None:
@@ -2017,6 +2461,10 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     picker_cache: list = []
     picker_cache_sig = None
     last_picker_tap = 0.0
+    # Modify Search editor (opened from the picker's lower-right cell). None =
+    # hidden; a SearchEditor while the edit-and-re-search screen is up. The
+    # picker list is kept underneath so Back returns to the grid unchanged.
+    editor: "SearchEditor | None" = None
 
     # ---- Settings menu (long-press 10s) -------------------------------------
     # menu_screen drives a small state machine that replaces lyric rendering:
@@ -2129,6 +2577,69 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         # feedback button right after the pick (handle_tap honours last_tap).
         last_tap = time.monotonic()
         print(f"[picker] selected {c['source']} — {c['title']}")
+
+    def open_editor() -> None:
+        """Modify Search cell tapped: open the editor prefilled with the current
+        (possibly already-corrected) display name. orig_sig carries the phone's
+        RAW report so a Search can persist the fix as an alias."""
+        nonlocal editor
+        editor = SearchEditor(
+            state.title, state.artist,
+            (state.raw_title or state.title, state.raw_artist or state.artist))
+
+    def submit_search() -> None:
+        """Search button in the editor: persist any rename as a durable alias,
+        adopt the edited name as the live track, and re-run the candidate sweep
+        for the new terms (returning to a refreshed grid)."""
+        nonlocal editor, picker, picker_cache, picker_cache_sig
+        new_title = editor.title.strip()
+        new_artist = editor.artist.strip()
+        if not new_title:
+            return                       # song name is the minimum to search
+        orig_title, orig_artist = editor.orig_sig
+        # Persist a rename only when both are given (set_alias needs an artist to
+        # key + no-ops on empty/unchanged); a title-only search is transient.
+        set_alias(orig_title, orig_artist, new_title, new_artist)
+        state.title, state.artist = new_title, new_artist
+        editor = None
+        picker = None
+        picker_cache, picker_cache_sig = [], None   # force a fresh sweep
+        asyncio.create_task(open_picker())
+
+    def editor_touch(lx: float, ly: float) -> None:
+        """Route one logical-coord tap on the Modify Search screen."""
+        nonlocal editor
+        lay = _editor_layout(w, h)
+        # Candidate strip (中 mode) wins the tap while composing.
+        if editor.pinyin_mode and editor.comp:
+            _f, _label, cands, prev_r, next_r, n_pages, pg = _ime_layout(
+                lay["compbar"], editor.comp, editor.cand_page)
+            if n_pages > 1 and prev_r.collidepoint(lx, ly):
+                editor.cand_page = (pg - 1) % n_pages
+                return
+            if n_pages > 1 and next_r.collidepoint(lx, ly):
+                editor.cand_page = (pg + 1) % n_pages
+                return
+            for hanzi, consume, rect in cands:
+                if rect.collidepoint(lx, ly):
+                    editor.select_candidate(hanzi, consume)
+                    return
+        if lay["back"].collidepoint(lx, ly):
+            editor = None                # back to the grid, unchanged
+            return
+        if lay["artist"].collidepoint(lx, ly):
+            editor.set_active("artist")
+            return
+        if lay["title"].collidepoint(lx, ly):
+            editor.set_active("title")
+            return
+        if lay["search"].collidepoint(lx, ly):
+            submit_search()
+            return
+        for _label, rect, action in lay["keys"]:
+            if rect.collidepoint(lx, ly):
+                editor.apply_key(action)
+                return
 
     def check_swipe() -> None:
         nonlocal swipe_fired
@@ -2437,6 +2948,28 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                             px, py = w - 1 - px, h - 1 - py
                         menu_touch(px, py, False)
                     continue
+                if editor is not None:
+                    # The Modify Search screen owns the screen (drawn over the
+                    # grid). Same debounced tap handling as the picker; drain
+                    # FINGERUP so a held finger can't trip the long-press.
+                    if event.type == pygame.FINGERUP:
+                        fingers.pop(event.finger_id, None)
+                        continue
+                    tap_xy = None
+                    if event.type == pygame.FINGERDOWN:
+                        tap_xy = (_logical_x(event.x), _logical_y(event.y))
+                    elif (event.type == pygame.MOUSEBUTTONDOWN
+                          and event.button == 1):
+                        px, py = event.pos
+                        if FLIP_180:
+                            px, py = w - 1 - px, h - 1 - py
+                        tap_xy = (px, py)
+                    if tap_xy is not None:
+                        now_t = time.monotonic()
+                        if now_t - last_picker_tap >= 0.25:
+                            last_picker_tap = now_t
+                            editor_touch(*tap_xy)
+                    continue
                 if picker is not None:
                     # The candidate grid owns the screen: a tap on a cell selects
                     # that lyric. Debounced so the FINGERDOWN + synthesized
@@ -2462,9 +2995,13 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                         if now_t - last_picker_tap >= 0.35:
                             last_picker_tap = now_t
                             for i, rect in enumerate(_picker_layout(w, h)):
-                                if i < len(picker) and rect.collidepoint(*tap_xy):
+                                if not rect.collidepoint(*tap_xy):
+                                    continue
+                                if i == MODIFY_SEARCH_CELL:
+                                    open_editor()
+                                elif i < len(picker):
                                     select_candidate(i)
-                                    break
+                                break
                     continue
                 # Touch: SDL delivers FINGERDOWN (normalized 0..1 coords) and,
                 # with touch-mouse emulation, a MOUSEBUTTONDOWN (pixel coords).
@@ -2534,10 +3071,14 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                         and time.monotonic() - f["t"] >= LONGPRESS_OPEN_S):
                     open_menu()
 
-            # A new song arrived while the picker was up → its candidates are
-            # stale, so drop the grid and let the new track's lyrics show.
-            if picker is not None and (state.title, state.artist) != picker_cache_sig:
+            # A new song arrived while the picker/editor was up → its candidates
+            # are stale, so drop them and let the new track's lyrics show. (A
+            # rename via Search sets state.title/artist and picker_cache_sig
+            # together, so it doesn't trip this.)
+            if (picker is not None or editor is not None) and (
+                    state.title, state.artist) != picker_cache_sig:
                 picker = None
+                editor = None
 
             # Hot-reload config.json (≤1s after you save it) so offset / font
             # / dot tweaks take effect without a restart. Skipped while the
@@ -2572,6 +3113,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 # Font panel replaces the lyric frame entirely.
                 draw_settings(screen, w, h, _settings_sizes(), set_color_names,
                               _settings_bolds())
+            elif editor is not None:
+                # Modify Search screen replaces the grid while editing.
+                draw_search_editor(screen, w, h, editor)
             elif picker is not None:
                 # RED-button candidate grid replaces the lyric frame.
                 draw_picker(screen, w, h, picker)

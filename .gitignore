@@ -1,17 +1,18 @@
- # Python
-  __pycache__/
-  *.py[cod]
+# Python
+__pycache__/
+*.py[cod]
 
-  # Runtime data (generated on the Pi, not source)
-  cache/
-  rejections.json
+# Runtime data (generated on the Pi, not source)
+cache/
+rejections.json
+aliases.json
 
-  # Local Claude Code settings
-  .claude/
+# Local Claude Code settings
+.claude/
 
-  # Editor / OS noise
-  .vscode/
-  .idea/
-  *.swp
-  .DS_Store
-  Thumbs.db
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db

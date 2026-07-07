@@ -19,6 +19,7 @@ are the knobs if they break.
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import hashlib
 import html
 import json
@@ -134,6 +135,58 @@ def add_rejection(track: str, artist: str, source: str) -> None:
         print(f"[reject] {source} marked wrong → {artist} — {track}")
     except OSError as e:
         print(f"[reject] write error: {e}")
+
+
+# --- Aliases (user-corrected track identity) -------------------------------
+# The RED picker's "Modify Search" lets the user fix a wrong/garbled title or
+# artist. To make that fix DURABLE, we key the correction by the song the phone
+# actually reports over AVRCP, so on a future play of the same song we resolve
+# to the corrected name (and its cache entry) instead of re-searching a bad
+# name. Stored as { "<orig artist>|<orig title>": {"artist","title"} } next to
+# this script. Runtime data → gitignored, not shipped/overwritten by OTA.
+ALIAS_PATH = Path(__file__).resolve().parent / "aliases.json"
+
+
+def _aliases_load() -> dict:
+    try:
+        with open(ALIAS_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[alias] {ALIAS_PATH.name} unreadable ({e}); ignoring")
+        return {}
+
+
+def get_alias(track: str, artist: str) -> dict | None:
+    """The corrected {"artist","title"} the user set for this AVRCP-reported
+    song, or None. Keyed by the ORIGINAL (phone-reported) artist|title."""
+    val = _aliases_load().get(_reject_key(track, artist))
+    if isinstance(val, dict) and val.get("title") and val.get("artist"):
+        return {"artist": val["artist"], "title": val["title"]}
+    return None
+
+
+def set_alias(orig_track: str, orig_artist: str,
+              new_track: str, new_artist: str) -> None:
+    """Remember that the phone-reported (orig_artist, orig_track) should be
+    treated as (new_artist, new_track). A no-op if the name is unchanged."""
+    new_track, new_artist = new_track.strip(), new_artist.strip()
+    if not (new_track and new_artist):
+        return
+    if (new_track.lower() == orig_track.strip().lower()
+            and new_artist.lower() == orig_artist.strip().lower()):
+        return                                  # nothing corrected
+    data = _aliases_load()
+    data[_reject_key(orig_track, orig_artist)] = {
+        "artist": new_artist, "title": new_track}
+    try:
+        with open(ALIAS_PATH, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"[alias] {orig_artist} — {orig_track} → {new_artist} — {new_track}")
+    except OSError as e:
+        print(f"[alias] write error: {e}")
 
 
 # --- NetEase (网易云音乐) ----------------------------------------------------
@@ -376,8 +429,16 @@ _SOURCES = (("QQ", fetch_qq), ("Kugou", fetch_kugou),
 # --- Multi-result search (RED-button picker) -------------------------------
 # When the user taps RED we no longer just reject + advance one source; we
 # gather a CONSOLIDATED list of candidate lyrics from every source so they can
-# pick the right version by hand. Per-source caps (sum = 9, a 3x3 grid):
-CANDIDATE_CAPS = (("QQ", 3), ("Kugou", 3), ("NetEase", 1), ("LRCLIB", 2))
+# pick the right version by hand. Balanced 2 per source across the 4 sources
+# (sum = 8, fills the 8 result cells; the 9th grid cell is Modify Search).
+CANDIDATE_CAPS = (("QQ", 2), ("Kugou", 2), ("NetEase", 2), ("LRCLIB", 2))
+# The picker shows at most this many results (8 cells; cell 9 is the button).
+GRID_MAX = 8
+# Query each source a little deeper than its 2-cap so that when a source
+# returns fewer than 2 (or none), we can BACKFILL the empty cells from the
+# sources that have extras and still fill up to 8. 4 lets two working sources
+# cover all 8 on their own.
+CANDIDATE_QUERY_LIMIT = 4
 
 
 def _qq_search_list(track: str, artist: str, limit: int,
@@ -519,22 +580,67 @@ _CANDIDATE_FNS = {"QQ": qq_candidates, "Kugou": kugou_candidates,
 
 def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
     """Consolidated candidate list across every source for the RED-button
-    picker: QQ ≤3, Kugou ≤3, NetEase ≤1, LRCLIB ≤2 (≤9 total). Each item is
+    picker: up to 2 per source, backfilled to GRID_MAX (8) total. Each item is
     {"source", "title", "artist", "lrc"}. Sources are queried independently and
     a failing one simply contributes nothing. `progress(name)` (optional) is
     called before each source is queried, for a live status line; it must not
-    raise."""
-    out: list[dict] = []
-    for name, cap in CANDIDATE_CAPS:
-        if progress is not None:
+    raise.
+
+    Selection is two-pass so the grid feels balanced but never wastes cells:
+      1. take up to each source's cap (2) in source order — the "one row each"
+         core;
+      2. if that leaves fewer than 8, backfill round-robin from each source's
+         leftovers (results beyond its cap) until 8 are filled or nothing's
+         left. So a thin/empty source is covered by whichever sources have
+         extras, instead of leaving a hole.
+
+    The four sources are queried CONCURRENTLY (one thread each) so the total
+    wait is ~the slowest single source, not the sum — otherwise the deeper
+    per-source query (needed for backfill) makes the grid take too long to
+    appear. A source that errors or exceeds the timeout simply contributes
+    nothing."""
+    if progress is not None:
+        try:
+            progress("all sources")
+        except Exception:
+            pass
+    by_name: dict[str, list[dict]] = {}
+    ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(CANDIDATE_CAPS))
+    try:
+        futs = {name: ex.submit(_CANDIDATE_FNS[name], track, artist,
+                                CANDIDATE_QUERY_LIMIT)
+                for name, _cap in CANDIDATE_CAPS}
+        for name, fut in futs.items():
             try:
-                progress(name)
-            except Exception:
-                pass
-        items = _CANDIDATE_FNS[name](track, artist, cap)
-        print(f"[picker] {name}: {len(items)} candidate(s)")
-        out.extend(items)
-    return out[:9]
+                by_name[name] = fut.result(timeout=25)
+            except Exception as e:
+                print(f"[picker] {name} failed: {e}")
+                by_name[name] = []
+            print(f"[picker] {name}: {len(by_name[name])} candidate(s)")
+    finally:
+        # Don't block the grid on a straggler source: let any still-running
+        # query finish in the background (its request has its own 10s timeout)
+        # and be discarded. The futures already collected are unaffected.
+        ex.shutdown(wait=False)
+    per_source = [by_name[name] for name, _cap in CANDIDATE_CAPS]
+    caps = [cap for _name, cap in CANDIDATE_CAPS]
+    # Pass 1: the per-source core (≤ cap each, in source order).
+    out: list[dict] = []
+    for items, cap in zip(per_source, caps):
+        out.extend(items[:cap])
+    # Pass 2: backfill to GRID_MAX from leftovers, round-robin across sources.
+    nxt = list(caps)                       # next unused index per source
+    made_progress = True
+    while len(out) < GRID_MAX and made_progress:
+        made_progress = False
+        for si, items in enumerate(per_source):
+            if len(out) >= GRID_MAX:
+                break
+            if nxt[si] < len(items):
+                out.append(items[nxt[si]])
+                nxt[si] += 1
+                made_progress = True
+    return out[:GRID_MAX]
 
 
 # --- Combined cascade ------------------------------------------------------
