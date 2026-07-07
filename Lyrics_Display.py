@@ -64,7 +64,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.5.8"
+APP_VERSION = "1.5.9"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -546,22 +546,34 @@ class AvrcpWatcher:
                     if props.get("Connected"):
                         any_connected = True
                     paired.append((path, props))
-                # If a phone is already linked (its AVRCP player just hasn't
-                # surfaced yet), don't drag a SECOND phone in beside it — one
-                # source at a time. Only reach out when nothing's connected.
-                if not any_connected:
-                    for path, props in paired:
-                        name = props.get("Alias") or props.get("Name") or path
-                        try:
-                            dintro = await self.bus.introspect(BLUEZ, path)
-                            dobj = self.bus.get_proxy_object(BLUEZ, path, dintro)
-                            print(f"[autoconnect] linking AVRCP to {name}…")
-                            await dobj.get_interface(
-                                DEVICE_IFACE).call_connect_profile(AVRCP_UUID)
-                            print(f"[autoconnect] AVRCP linked: {name}")
-                            break   # one source is enough
-                        except Exception as e:
-                            print(f"[autoconnect] {name}: {e}")
+                # We only get here while player_path is None — no AVRCP source
+                # is live. Pick who to reach out to:
+                #   - Nothing connected → try any paired phone to bring one up.
+                #   - A phone IS connected but no MediaPlayer1 has surfaced →
+                #     force AVRCP up on THAT phone. iOS on a cold boot sometimes
+                #     brings up A2DP audio without ever opening the AVCTP control
+                #     channel, so the link shows "connected" on the phone while
+                #     the Pi hangs at "waiting for music" forever (until a power
+                #     cycle). connect_profile(AVRCP_UUID) forces the control
+                #     channel and MediaPlayer1 appears. Only target already-
+                #     connected phones here so we don't drag a SECOND source in
+                #     beside the live one — still one source at a time.
+                if any_connected:
+                    targets = [(p, pr) for (p, pr) in paired if pr.get("Connected")]
+                else:
+                    targets = paired
+                for path, props in targets:
+                    name = props.get("Alias") or props.get("Name") or path
+                    try:
+                        dintro = await self.bus.introspect(BLUEZ, path)
+                        dobj = self.bus.get_proxy_object(BLUEZ, path, dintro)
+                        print(f"[autoconnect] linking AVRCP to {name}…")
+                        await dobj.get_interface(
+                            DEVICE_IFACE).call_connect_profile(AVRCP_UUID)
+                        print(f"[autoconnect] AVRCP linked: {name}")
+                        break   # one source is enough
+                    except Exception as e:
+                        print(f"[autoconnect] {name}: {e}")
             await asyncio.sleep(self.AUTOCONNECT_INTERVAL_S)
 
     async def _position_poller(self) -> None:
