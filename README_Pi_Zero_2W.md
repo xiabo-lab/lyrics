@@ -372,12 +372,18 @@ All gestures are tuned to be usable at a glance while driving.
     Offset** (`latency_offset_ms`, 0–3 s in 0.1 s steps) and **Lyrics Timing
     Offset** (`lead_offset_ms`, −3…+3 s in 0.5 s steps). Each tap previews live
     and saves to `config.json` immediately.
+  - **Network** — a read-only status screen showing the Wi-Fi network name, the
+    Pi's IP address, and whether the **internet** is actually reachable
+    (Online / Offline), with a **Check now** button. "Online" means a live
+    connection to GitHub succeeded — i.e. firmware updates and lyric look-ups
+    will work — not merely that Wi-Fi is associated.
   - **Software Version** — build info and the Pi's Bluetooth name, plus
     **Update Firmware**: pulls the latest code from GitHub and restarts, so you
     can update with no computer or SSH (tap once to arm, again to confirm). It
     only applies when GitHub is a **newer** version — otherwise it reports
     "Already up to date" and leaves the running build alone, so it can never
-    downgrade. Your `config.json`, cached lyrics, and rejections are preserved.
+    downgrade. Your `config.json`, cached lyrics, rejections, and saved name
+    corrections (`aliases.json`) are preserved.
 - **Double-tap** → toggles a brightness slider; while it's shown, a one-finger
   vertical swipe brightens/darkens.
 - **Triple-tap** → deletes the current song's **cached** lyrics and shows
@@ -388,11 +394,21 @@ All gestures are tuned to be usable at a glance while driving.
   is live by default and resets on the next track — **but you can make it
   permanent** by confirming with the Green button (see below).
 - **Green ✓ / Red ✗ edge buttons** → appear when fresh (uncached) lyrics load.
-  **Green** confirms the match and caches it. **Red** opens a **picker** — a 3×3
-  grid of up to 9 candidate versions gathered from *every* source (QQ, Kugou,
-  NetEase, LRCLIB) for that song, each cell showing the song title and artist —
-  tap the right one to switch to it. After a pick both buttons stay up (Red
-  reopens the grid) until you confirm with **Green**.
+  **Green** confirms the match and caches it. **Red** opens a **picker** — a
+  grid of up to **8** candidate versions (2 from each source: QQ, Kugou, NetEase,
+  LRCLIB), each cell showing the song title and artist — tap the right one to
+  switch to it. After a pick both buttons stay up (Red reopens the grid) until
+  you confirm with **Green**.
+  - If lyrics **can't be found** at all ("Lyrics not found"), the **Red** bar
+    still appears on its own so you can open the picker and hand-search.
+  - **Modify Search** (lower-right cell of the grid) → opens an on-screen
+    keyboard to correct a garbled/wrong **artist** and **song** name and search
+    again. The song name alone is enough (artist optional); `←`/`→` move the
+    cursor to fix the middle of a name. A **中 / A** key toggles a built-in
+    **pinyin → Chinese** input: type pinyin (e.g. `zhoujielun`) and tap a
+    character/word from the candidate strip (`«` `»` page through all of them).
+    Correcting a name here is **remembered** — the next time that song plays,
+    the display uses your corrected name and its cached lyric automatically.
 
   **Saving a sync fix so it sticks:** if a song's timing is off, **swipe to fix
   it first (two-finger horizontal swipe), _then_ press Green.** Green bakes
@@ -426,10 +442,13 @@ For each track, `lyric_sources.fetch_synced_lyrics_any()` tries, in order:
 The first source returning *timestamped* lyrics wins. Results are **not** cached
 automatically — a lyric only sticks once you confirm it with the green button,
 so a wrong match never gets remembered. If the auto-picked version is wrong, the
-**red button** opens a picker of candidates gathered across every source
-(QQ ≤3, Kugou ≤3, NetEase ≤1, LRCLIB ≤2 — up to 9 in a 3×3 grid) so you can pick
-the right one by hand, then confirm with green. A **triple-tap** on a playing
-lyric deletes a bad **cached** entry so it's re-searched next time.
+**red button** opens a picker of up to **8** candidates (2 from each of QQ,
+Kugou, NetEase, LRCLIB — the four sources are queried in parallel so the grid
+appears quickly) so you can pick the right one by hand, then confirm with green.
+If the song's name is wrong or missing, **Modify Search** in the grid lets you
+retype the artist/song — including Chinese via a built-in pinyin keyboard — and
+search again; the correction is remembered for future plays. A **triple-tap** on
+a playing lyric deletes a bad **cached** entry so it's re-searched next time.
 
 > The QQ/Kugou/NetEase endpoints are public but unofficial and undocumented;
 > they may break without notice. The relevant URLs/constants are grouped at the
@@ -445,9 +464,9 @@ lyric deletes a bad **cached** entry so it's re-searched next time.
 `APP_VERSION` is newer** than the running build, overwrites the program files
 and restarts (otherwise it just says "Already up to date" — it never
 downgrades). Tap once to arm, again to confirm. Your `config.json`, cached
-lyrics (`cache/`), and `rejections.json` are **not** touched, so your tuning
-survives. So bump `APP_VERSION` in `Lyrics_Display.py` whenever you publish a
-change you want devices to pull.
+lyrics (`cache/`), `rejections.json`, and `aliases.json` (saved name
+corrections) are **not** touched, so your tuning survives. So bump `APP_VERSION`
+in `Lyrics_Display.py` whenever you publish a change you want devices to pull.
 
 > **Forks:** the update always pulls from the repo in `UPDATE_URL` near the top
 > of `Lyrics_Display.py`. Point it at your own fork to ship updates to your own

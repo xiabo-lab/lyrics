@@ -351,11 +351,13 @@ your computer with the other Pi powered on:
 scp    fuwenxu@<old-ip>:~/carlyrics/config.json     ./
 scp -r fuwenxu@<old-ip>:~/carlyrics/cache           ./
 scp    fuwenxu@<old-ip>:~/carlyrics/rejections.json ./   # if it exists
+scp    fuwenxu@<old-ip>:~/carlyrics/aliases.json    ./   # saved name corrections, if any
 
 # push to the Pi 5
 scp    ./config.json     fuwenxu@carlyric.local:~/carlyrics/
 scp -r ./cache           fuwenxu@carlyric.local:~/carlyrics/
 scp    ./rejections.json fuwenxu@carlyric.local:~/carlyrics/
+scp    ./aliases.json    fuwenxu@carlyric.local:~/carlyrics/
 ```
 
 Then restart the service on the Pi 5:
@@ -378,4 +380,5 @@ From the screen: long-press → **Software Version → Update Firmware**, or man
 cd ~/carlyrics && git pull && sudo systemctl restart carlyric.service
 ```
 
-Your `config.json`, `cache/`, and `rejections.json` are preserved across updates.
+Your `config.json`, `cache/`, `rejections.json`, and `aliases.json` (saved name
+corrections) are preserved across updates.

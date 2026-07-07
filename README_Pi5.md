@@ -371,11 +371,13 @@ run these from your computer with the Zero powered on:
 scp    fuwenxu@<zero-ip>:~/carlyrics/config.json     ./
 scp -r fuwenxu@<zero-ip>:~/carlyrics/cache           ./
 scp    fuwenxu@<zero-ip>:~/carlyrics/rejections.json ./   # if it exists
+scp    fuwenxu@<zero-ip>:~/carlyrics/aliases.json    ./   # saved name corrections, if any
 
 # push to the Pi 5
 scp    ./config.json     fuwenxu@carlyric.local:~/carlyrics/
 scp -r ./cache           fuwenxu@carlyric.local:~/carlyrics/
 scp    ./rejections.json fuwenxu@carlyric.local:~/carlyrics/
+scp    ./aliases.json    fuwenxu@carlyric.local:~/carlyrics/
 ```
 
 Then restart the service on the Pi 5:
@@ -402,5 +404,5 @@ Update Firmware**, or manually:
 cd ~/carlyrics && git pull && sudo systemctl restart carlyric.service
 ```
 
-Your `config.json`, `cache/`, and `rejections.json` are preserved across
-updates.
+Your `config.json`, `cache/`, `rejections.json`, and `aliases.json` (saved name
+corrections) are preserved across updates.
