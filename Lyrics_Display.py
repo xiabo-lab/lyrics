@@ -47,7 +47,7 @@ from dbus_next.aio import MessageBus
 from lrclib import LyricLine, parse_lrc, shift_lrc_timestamps
 from lyric_sources import (
     delete_from_cache,
-    fetch_synced_lyrics_any as fetch_synced_lyrics,
+    fetch_best_lyrics,
     get_alias,
     save_to_cache,
     search_candidates,
@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.8.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -385,6 +385,13 @@ class State:
         self.lrc_raw: str = ""
         self.lyrics_source: str | None = None
         self.awaiting_feedback: bool = False
+        # Every candidate the initial sweep collected, kept so the RED picker
+        # opens instantly instead of re-searching all four sources. candidates
+        # is the grid list; candidates_sig is the (title, artist) it belongs to
+        # — a mismatch (or None, e.g. after a cache hit, where no sweep ran)
+        # means RED must go to the network.
+        self.candidates: list = []
+        self.candidates_sig: tuple[str, str] | None = None
         # Live, current-song-only sync nudge from two-finger swipes. Reset to
         # 0 on every track change (see _handle) so a fix for one odd master
         # never leaks onto the next (normal) song.
@@ -411,28 +418,33 @@ class State:
         self.position_known = True
 
 
-# Friendly names for the on-screen "Searching …" status, keyed by the source
-# names lyric_sources reports. Unknown names fall back to themselves.
-SOURCE_LABELS = {"QQ": "QQ Music", "Kugou": "Kugou", "NetEase": "NetEase",
-                 "LRCLIB": "LRCLIB"}
+# Friendly names for the on-screen "Searching …" status, keyed by the labels
+# lyric_sources reports through its progress callback. Unknown names fall back
+# to themselves.
+SOURCE_LABELS = {"all sources": "all sources", "QQ": "QQ Music",
+                 "Kugou": "Kugou", "NetEase": "NetEase", "LRCLIB": "LRCLIB"}
 
 
 async def fetch_lyrics_for(state: State, title: str, artist: str) -> None:
-    """requests is blocking → run in a thread so dbus + render keep flowing."""
+    """requests is blocking → run in a thread so dbus + render keep flowing.
+
+    One sweep of all four sources picks the best-scoring match to display AND
+    fills state.candidates, so a later RED tap opens the picker with no network
+    round-trip at all."""
     print(f"[lyrics] fetching: {artist} — {title}")
     loop = asyncio.get_running_loop()
 
     def on_source(name: str) -> None:
-        # Called from the fetch worker thread as the cascade tries each source.
-        # Hop back to the event loop to update the display text, honouring
-        # State's single-thread rule (no cross-thread attribute writes).
+        # Called from the fetch worker thread when the sweep starts. Hop back to
+        # the event loop to update the display text, honouring State's
+        # single-thread rule (no cross-thread attribute writes).
         label = SOURCE_LABELS.get(name, name)
         loop.call_soon_threadsafe(
             setattr, state, "lyrics_status", f"♪ Searching {label}…")
 
     try:
-        lrc, source = await asyncio.to_thread(
-            fetch_synced_lyrics, title, artist, on_source)
+        lrc, source, cands = await asyncio.to_thread(
+            fetch_best_lyrics, title, artist, on_source)
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -440,7 +452,16 @@ async def fetch_lyrics_for(state: State, title: str, artist: str) -> None:
         state.lines = []
         state.lyrics_status = "(network error)"
         state.awaiting_feedback = False
+        state.candidates, state.candidates_sig = [], None
         return
+
+    # cands is None on a cache hit — no sweep ran, so drop whatever the previous
+    # song left behind rather than let the picker show someone else's results.
+    if cands is None:
+        state.candidates, state.candidates_sig = [], None
+    else:
+        state.candidates, state.candidates_sig = cands, (title, artist)
+        print(f"[lyrics] {len(cands)} candidate(s) held for the picker")
 
     if not lrc:
         state.lines = []
@@ -2476,12 +2497,12 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 
     # ---- Source picker (RED button → 3x3 candidate grid) -------------------
     # picker is the candidate list while the grid is shown (None = hidden).
-    # While picker_searching we're gathering candidates in a worker thread.
-    # picker_cache (+ its sig) lets a re-open of the SAME song skip the network.
+    # While picker_searching we're gathering candidates in a worker thread —
+    # only ever the case for a Modify Search re-query, since the initial lookup
+    # already left every source's results in state.candidates and RED opens the
+    # grid straight from those, with zero network work.
     picker = None
     picker_searching = False
-    picker_cache: list = []
-    picker_cache_sig = None
     last_picker_tap = 0.0
     # Modify Search editor (opened from the picker's lower-right cell). None =
     # hidden; a SearchEditor while the edit-and-re-search screen is up. The
@@ -2551,16 +2572,21 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         toast_until = time.monotonic() + 2.5
 
     async def open_picker() -> None:
-        """RED tapped: gather a consolidated multi-source candidate list and
-        show the 3x3 grid. Re-opening the same song reuses the cached results
-        (no second network sweep). Runs the blocking fetch in a thread."""
-        nonlocal picker, picker_searching, picker_cache, picker_cache_sig
+        """RED tapped: show the 3x3 candidate grid.
+
+        Instantaneous in the normal case — the initial lookup already swept
+        every source and parked its results in state.candidates. The network
+        path below only runs when we hold nothing for this name: a Modify
+        Search re-query (the user typed a new title/artist). That blocking
+        search goes to a thread."""
+        nonlocal picker, picker_searching
         if picker_searching or picker is not None:
             return
         sig = (state.title, state.artist)
-        if picker_cache_sig == sig and picker_cache:
-            picker = picker_cache
+        if state.candidates_sig == sig:
+            picker = state.candidates
             fingers.clear()      # drop the RED-tap finger so it can't linger
+            print(f"[picker] showing {len(picker)} cached candidate(s)")
             return
         picker_searching = True
         try:
@@ -2576,7 +2602,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         # Show the grid even with ZERO results: the empty cells read faint and
         # the Modify Search button is always present, so the user can still edit
         # the query and re-search a song the automatic lookup missed.
-        picker_cache, picker_cache_sig, picker = cands, sig, cands
+        state.candidates, state.candidates_sig, picker = cands, sig, cands
         fingers.clear()          # drop the RED-tap finger so it can't linger
         print(f"[picker] showing {len(cands)} candidate(s)")
 
@@ -2612,7 +2638,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         """Search button in the editor: persist any rename as a durable alias,
         adopt the edited name as the live track, and re-run the candidate sweep
         for the new terms (returning to a refreshed grid)."""
-        nonlocal editor, picker, picker_cache, picker_cache_sig
+        nonlocal editor, picker
         new_title = editor.title.strip()
         new_artist = editor.artist.strip()
         if not new_title:
@@ -2624,7 +2650,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         state.title, state.artist = new_title, new_artist
         editor = None
         picker = None
-        picker_cache, picker_cache_sig = [], None   # force a fresh sweep
+        # New search terms → the held candidates are for the old name. Drop them
+        # so open_picker sweeps the network for what the user actually typed.
+        state.candidates, state.candidates_sig = [], None
         asyncio.create_task(open_picker())
 
     def editor_touch(lx: float, ly: float) -> None:
@@ -3101,10 +3129,10 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 
             # A new song arrived while the picker/editor was up → its candidates
             # are stale, so drop them and let the new track's lyrics show. (A
-            # rename via Search sets state.title/artist and picker_cache_sig
-            # together, so it doesn't trip this.)
+            # rename via Search closes both before clearing the sig, so it can't
+            # trip this mid-flight.)
             if (picker is not None or editor is not None) and (
-                    state.title, state.artist) != picker_cache_sig:
+                    state.title, state.artist) != state.candidates_sig:
                 picker = None
                 editor = None
 

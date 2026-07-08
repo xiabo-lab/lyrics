@@ -1,12 +1,17 @@
 """Multi-source synced-lyrics fetcher with local cache.
 
-Cascade: local cache → QQ Music (QQ音乐) → Kugou (酷狗音乐) → NetEase Cloud
-Music (网易云音乐) → LRCLIB. Chinese-catalog sources lead because the library
-is mostly Chinese; LRCLIB is the Western-leaning fallback. Returns raw LRC
-text (parseable by lrclib.parse_lrc) or None.
+Lookup: local cache → a single CONCURRENT sweep of QQ Music (QQ音乐), Kugou
+(酷狗音乐), NetEase Cloud Music (网易云音乐) and LRCLIB. Every candidate every
+source returns is scored against the requested artist + title and the highest
+scorer wins — a source's first search hit is often the wrong version of a song,
+so we compare them all rather than trusting whoever answers first. Returns raw
+LRC text (parseable by lrclib.parse_lrc) or None.
+
+The same sweep populates the RED-button picker grid (see fetch_best_lyrics),
+so opening the picker after an automatic lookup costs no network at all.
 
 Cache location: ./cache/ next to this file. Hits are silent network-free
-returns; misses fall through to the online cascade and the result is
+returns; misses fall through to the online sweep and the result is
 written to disk for next time.
 
 Negative results (all sources missed) are intentionally NOT cached, so
@@ -20,17 +25,17 @@ from __future__ import annotations
 
 import base64
 import concurrent.futures
+import difflib
 import hashlib
 import html
 import json
+import re
+import unicodedata
 from pathlib import Path
 
 import requests
 
-from lrclib import (
-    fetch_synced_lyrics as _fetch_lrclib,
-    search_synced_lyrics as _search_lrclib,
-)
+from lrclib import search_synced_lyrics as _search_lrclib
 
 # --- Local cache -----------------------------------------------------------
 CACHE_DIR = Path(__file__).resolve().parent / "cache"
@@ -198,31 +203,6 @@ NETEASE_HEADERS = {
 }
 
 
-def _netease_search_id(track: str, artist: str, timeout: float = 10) -> int | None:
-    """Find the best-matching NetEase song ID for a (track, artist)."""
-    query = f"{track} {artist}".strip()
-    if not query:
-        return None
-    r = requests.get(
-        NETEASE_SEARCH,
-        params={"s": query, "type": 1, "limit": 5},
-        headers=NETEASE_HEADERS,
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    songs = (data.get("result") or {}).get("songs") or []
-    if not songs:
-        return None
-    # Prefer a song whose artist name overlaps with what AVRCP gave us.
-    artist_lc = artist.lower()
-    for s in songs:
-        names = [a.get("name", "").lower() for a in (s.get("artists") or [])]
-        if any(artist_lc in n or n in artist_lc for n in names if n):
-            return s["id"]
-    return songs[0]["id"]
-
-
 def _netease_lyric(song_id: int, timeout: float = 10) -> str | None:
     """Pull the LRC blob for a NetEase song ID. Returns None if unsynced."""
     r = requests.get(
@@ -242,17 +222,6 @@ def _netease_lyric(song_id: int, timeout: float = 10) -> str | None:
     return lrc
 
 
-def fetch_netease(track: str, artist: str) -> str | None:
-    try:
-        sid = _netease_search_id(track, artist)
-        if sid is None:
-            return None
-        return _netease_lyric(sid)
-    except requests.RequestException as e:
-        print(f"[netease] error: {e}")
-        return None
-
-
 # --- QQ Music (QQ音乐) ------------------------------------------------------
 QQ_SEARCH = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
 QQ_LYRIC = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
@@ -260,31 +229,6 @@ QQ_HEADERS = {
     "Referer": "https://y.qq.com/",
     "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) carlyric/1.0",
 }
-
-
-def _qq_search_mid(track: str, artist: str, timeout: float = 10) -> str | None:
-    """Find the best-matching QQ Music songmid for a (track, artist)."""
-    query = f"{track} {artist}".strip()
-    if not query:
-        return None
-    r = requests.get(
-        QQ_SEARCH,
-        params={"w": query, "format": "json", "n": 5, "p": 1},
-        headers=QQ_HEADERS,
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    songs = (((data.get("data") or {}).get("song")) or {}).get("list") or []
-    if not songs:
-        return None
-    artist_lc = artist.lower()
-    for s in songs:
-        singers = s.get("singer") or []
-        names = [a.get("name", "").lower() for a in singers]
-        if any(artist_lc in n or n in artist_lc for n in names if n):
-            return s.get("songmid")
-    return songs[0].get("songmid")
 
 
 def _qq_lyric(songmid: str, timeout: float = 10) -> str | None:
@@ -304,17 +248,6 @@ def _qq_lyric(songmid: str, timeout: float = 10) -> str | None:
     return html.unescape(lyric)
 
 
-def fetch_qq(track: str, artist: str) -> str | None:
-    try:
-        mid = _qq_search_mid(track, artist)
-        if not mid:
-            return None
-        return _qq_lyric(mid)
-    except requests.RequestException as e:
-        print(f"[qq] error: {e}")
-        return None
-
-
 # --- Kugou (酷狗音乐) -------------------------------------------------------
 # Three-step flow: search for the song's hash, ask krcs for a matching lyric
 # candidate (id + accesskey), then download that candidate as base64 LRC from
@@ -329,31 +262,6 @@ KUGOU_HEADERS = {
     "Referer": "https://www.kugou.com/",
     "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) carlyric/1.0",
 }
-
-
-def _kugou_search_hash(track: str, artist: str, timeout: float = 10) -> str | None:
-    """Find the best-matching Kugou song hash for a (track, artist)."""
-    query = f"{track} {artist}".strip()
-    if not query:
-        return None
-    r = requests.get(
-        KUGOU_SEARCH,
-        params={"format": "json", "keyword": query, "page": 1,
-                "pagesize": 5, "showtype": 1},
-        headers=KUGOU_HEADERS,
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    data = r.json()
-    songs = (data.get("data") or {}).get("info") or []
-    if not songs:
-        return None
-    artist_lc = artist.lower()
-    for s in songs:
-        singer = (s.get("singername") or "").lower()
-        if singer and (artist_lc in singer or singer in artist_lc):
-            return s.get("hash")
-    return songs[0].get("hash")
 
 
 def _kugou_lyric(song_hash: str, timeout: float = 10) -> str | None:
@@ -396,41 +304,12 @@ def _kugou_lyric(song_hash: str, timeout: float = 10) -> str | None:
     return lrc
 
 
-def fetch_kugou(track: str, artist: str) -> str | None:
-    try:
-        song_hash = _kugou_search_hash(track, artist)
-        if not song_hash:
-            return None
-        return _kugou_lyric(song_hash)
-    except requests.RequestException as e:
-        print(f"[kugou] error: {e}")
-        return None
-
-
-def fetch_lrclib(track: str, artist: str) -> str | None:
-    """LRCLIB wrapper that swallows network errors, matching fetch_qq/_netease
-    so all sources share one calling convention in the cascade."""
-    try:
-        return _fetch_lrclib(track, artist)
-    except requests.RequestException as e:
-        print(f"[lrclib] error: {e}")
-        return None
-
-
-# Library is mostly Chinese, so the Chinese-catalog sources (QQ, Kugou,
-# NetEase) go first — they match Chinese tracks far more reliably. LRCLIB is
-# the crowd-sourced/Western-leaning fallback, last so its loose matches can't
-# win ahead of a correct Chinese result. The names here are what gets stored
-# in rejections.json, so keep them stable.
-_SOURCES = (("QQ", fetch_qq), ("Kugou", fetch_kugou),
-            ("NetEase", fetch_netease), ("LRCLIB", fetch_lrclib))
-
-
-# --- Multi-result search (RED-button picker) -------------------------------
-# When the user taps RED we no longer just reject + advance one source; we
-# gather a CONSOLIDATED list of candidate lyrics from every source so they can
-# pick the right version by hand. Balanced 2 per source across the 4 sources
-# (sum = 8, fills the 8 result cells; the 9th grid cell is Modify Search).
+# --- Multi-result search (auto best-match + RED-button picker) -------------
+# One sweep serves both jobs: every source's candidates are scored against the
+# requested (title, artist) to pick what we display, and the same results back
+# the picker grid so RED needs no second network round-trip. Balanced 2 per
+# source across the 4 sources (sum = 8, fills the 8 result cells; the 9th grid
+# cell is Modify Search).
 CANDIDATE_CAPS = (("QQ", 2), ("Kugou", 2), ("NetEase", 2), ("LRCLIB", 2))
 # The picker shows at most this many results (8 cells; cell 9 is the button).
 GRID_MAX = 8
@@ -439,6 +318,141 @@ GRID_MAX = 8
 # sources that have extras and still fill up to 8. 4 lets two working sources
 # cover all 8 on their own.
 CANDIDATE_QUERY_LIMIT = 4
+
+
+# --- Match scoring ----------------------------------------------------------
+# Search engines happily return "《歌名》(Live)" or a cover by another singer as
+# result #1, so we can't trust position. Every candidate is scored on how well
+# its own reported title + artist match what the phone asked for, and the best
+# score wins across ALL sources.
+
+# Everything that shouldn't affect a match: spacing, case, width, and the
+# punctuation the four catalogues sprinkle differently around the same song.
+_PUNCT_RE = re.compile(
+    r"[\s\-_·・,，.。!！?？'’‘\"“”:：;；/\\|~〜*&+()（）\[\]【】「」『』<>《》]+")
+# Candidate artist fields arrive as "周杰伦/费玉清", "A & B", "X feat. Y"…
+_ARTIST_SPLIT_RE = re.compile(r"[/,&;、，]|\bfeat\.?\b|\bft\.?\b|\bwith\b",
+                              re.IGNORECASE)
+# A real synced lyric has many [mm:ss] lines; some sources hand back a stub
+# holding only credits ("[00:00.00]作词：…"). Score those below any real match.
+_TIMETAG_RE = re.compile(r"\[\d+:\d+")
+MIN_SYNCED_LINES = 5
+STUB_PENALTY = 0.35
+# Title carries more signal than artist: AVRCP artist strings are often the
+# album artist, a group name, or blank, while the title is nearly always right.
+TITLE_WEIGHT = 0.65
+ARTIST_WEIGHT = 0.35
+# Pure tie-break, never enough to overturn a real difference in similarity.
+# Mirrors the old cascade order: the library is mostly Chinese, so on an equal
+# score prefer the Chinese catalogues over LRCLIB's crowd-sourced entries.
+SOURCE_BIAS = {"QQ": 0.003, "Kugou": 0.002, "NetEase": 0.001, "LRCLIB": 0.0}
+
+
+def _norm(s: str) -> str:
+    """Casefold + strip punctuation/spacing so "Qi Li Xiang" and "七里香(Live)"
+    compare on their substance. NFKC folds full-width CJK punctuation first."""
+    return _PUNCT_RE.sub("", unicodedata.normalize("NFKC", s or "").lower())
+
+
+def _sim(a: str, b: str) -> float:
+    """0..1 similarity of two already-normalized strings. Containment scores
+    high because catalogues pad titles with suffixes ("七里香" vs "七里香live")."""
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    ratio = difflib.SequenceMatcher(None, a, b).ratio()
+    if a in b or b in a:
+        # Scale by how much of the longer string the shorter one covers, so a
+        # 2-char title inside a 20-char one doesn't read as a near-perfect hit.
+        ratio = max(ratio, 0.6 + 0.35 * (min(len(a), len(b)) / max(len(a), len(b))))
+    return ratio
+
+
+def _artist_sim(cand_artist: str, want_artist: str) -> float:
+    """Best similarity over every pairing of the two multi-artist fields.
+    A blank request scores neutral — we can't judge, so don't punish."""
+    want_parts = [_norm(p) for p in _ARTIST_SPLIT_RE.split(want_artist or "")]
+    cand_parts = [_norm(p) for p in _ARTIST_SPLIT_RE.split(cand_artist or "")]
+    want_parts = [p for p in want_parts if p]
+    cand_parts = [p for p in cand_parts if p]
+    if not want_parts:
+        return 0.5
+    if not cand_parts:
+        return 0.0
+    # Compare the whole fields too: "A/B" vs "A/B" is an exact match that
+    # per-part pairing alone would score no better than "A" vs "A/B".
+    best = _sim(_norm(cand_artist), _norm(want_artist))
+    for c in cand_parts:
+        for wnt in want_parts:
+            best = max(best, _sim(c, wnt))
+    return best
+
+
+def score_candidate(cand: dict, track: str, artist: str) -> float:
+    """How well `cand` matches the requested (track, artist), roughly 0..1.
+
+    Weighted title + artist similarity, minus a penalty for lyrics too short to
+    be a real synced transcript, plus a hair of source bias to break ties
+    deterministically."""
+    score = (TITLE_WEIGHT * _sim(_norm(cand.get("title", "")), _norm(track))
+             + ARTIST_WEIGHT * _artist_sim(cand.get("artist", ""), artist))
+    if len(_TIMETAG_RE.findall(cand.get("lrc", ""))) < MIN_SYNCED_LINES:
+        score -= STUB_PENALTY
+    return score + SOURCE_BIAS.get(cand.get("source", ""), 0.0)
+
+
+def best_candidate(cands: list[dict], track: str, artist: str) -> dict | None:
+    """The highest-scoring candidate, or None for an empty list."""
+    if not cands:
+        return None
+    scored = [(score_candidate(c, track, artist), c) for c in cands]
+    # max() keeps the first of equal scores, so a within-source tie resolves to
+    # that source's own ranking (its result #1 beats its #2).
+    best_score, best = max(scored, key=lambda sc: sc[0])
+    for score, c in scored:
+        print(f"[match] {score:.3f} {'*' if c is best else ' '} "
+              f"{c['source']}: {c['artist']} — {c['title']}")
+    print(f"[match] best = {best['source']} ({best_score:.3f})")
+    return best
+
+
+# QQ/Kugou/NetEase all work the same way: one search call returns N song IDs,
+# then each ID needs its own request to pull the LRC. Those per-ID downloads are
+# independent, so run them together — serially they'd make the whole sweep take
+# ~(1 + limit) round-trips per source instead of ~2, and the song is already
+# playing while we search. Same number of requests either way, just overlapped.
+_LYRIC_WORKERS = 4
+
+
+def _candidates(source: str, search_fn, lyric_fn,
+                track: str, artist: str, limit: int) -> list[dict]:
+    """Search `source`, download every hit's LRC concurrently, and return the
+    ones that have synced lyrics as {"source","title","artist","lrc"} — in the
+    source's own ranking order, which best_candidate() uses to break ties.
+
+    A failed search yields []; a single failed/unsynced LRC just drops that one
+    candidate."""
+    try:
+        entries = search_fn(track, artist, limit)
+    except requests.RequestException as e:
+        print(f"[{source.lower()}] candidates error: {e}")
+        return []
+    if not entries:
+        return []
+
+    def _lrc(key):
+        try:
+            return lyric_fn(key)
+        except requests.RequestException:
+            return None
+
+    with concurrent.futures.ThreadPoolExecutor(
+            max_workers=min(len(entries), _LYRIC_WORKERS)) as ex:
+        # map() preserves input order, so the source's ranking survives.
+        lrcs = list(ex.map(_lrc, [key for key, _t, _a in entries]))
+    return [{"source": source, "title": title, "artist": a, "lrc": lrc}
+            for (_key, title, a), lrc in zip(entries, lrcs) if lrc][:limit]
 
 
 def _qq_search_list(track: str, artist: str, limit: int,
@@ -465,21 +479,7 @@ def _qq_search_list(track: str, artist: str, limit: int,
 
 
 def qq_candidates(track: str, artist: str, limit: int) -> list[dict]:
-    out: list[dict] = []
-    try:
-        for mid, title, a in _qq_search_list(track, artist, limit):
-            try:
-                lrc = _qq_lyric(mid)
-            except requests.RequestException:
-                lrc = None
-            if lrc:
-                out.append({"source": "QQ", "title": title,
-                            "artist": a, "lrc": lrc})
-            if len(out) >= limit:
-                break
-    except requests.RequestException as e:
-        print(f"[qq] candidates error: {e}")
-    return out
+    return _candidates("QQ", _qq_search_list, _qq_lyric, track, artist, limit)
 
 
 def _kugou_search_list(track: str, artist: str, limit: int,
@@ -505,21 +505,8 @@ def _kugou_search_list(track: str, artist: str, limit: int,
 
 
 def kugou_candidates(track: str, artist: str, limit: int) -> list[dict]:
-    out: list[dict] = []
-    try:
-        for h, title, a in _kugou_search_list(track, artist, limit):
-            try:
-                lrc = _kugou_lyric(h)
-            except requests.RequestException:
-                lrc = None
-            if lrc:
-                out.append({"source": "Kugou", "title": title,
-                            "artist": a, "lrc": lrc})
-            if len(out) >= limit:
-                break
-    except requests.RequestException as e:
-        print(f"[kugou] candidates error: {e}")
-    return out
+    return _candidates("Kugou", _kugou_search_list, _kugou_lyric,
+                       track, artist, limit)
 
 
 def _netease_search_list(track: str, artist: str, limit: int,
@@ -546,21 +533,8 @@ def _netease_search_list(track: str, artist: str, limit: int,
 
 
 def netease_candidates(track: str, artist: str, limit: int) -> list[dict]:
-    out: list[dict] = []
-    try:
-        for sid, title, a in _netease_search_list(track, artist, limit):
-            try:
-                lrc = _netease_lyric(sid)
-            except requests.RequestException:
-                lrc = None
-            if lrc:
-                out.append({"source": "NetEase", "title": title,
-                            "artist": a, "lrc": lrc})
-            if len(out) >= limit:
-                break
-    except requests.RequestException as e:
-        print(f"[netease] candidates error: {e}")
-    return out
+    return _candidates("NetEase", _netease_search_list, _netease_lyric,
+                       track, artist, limit)
 
 
 def lrclib_candidates(track: str, artist: str, limit: int) -> list[dict]:
@@ -578,27 +552,15 @@ _CANDIDATE_FNS = {"QQ": qq_candidates, "Kugou": kugou_candidates,
                   "NetEase": netease_candidates, "LRCLIB": lrclib_candidates}
 
 
-def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
-    """Consolidated candidate list across every source for the RED-button
-    picker: up to 2 per source, backfilled to GRID_MAX (8) total. Each item is
-    {"source", "title", "artist", "lrc"}. Sources are queried independently and
-    a failing one simply contributes nothing. `progress(name)` (optional) is
-    called before each source is queried, for a live status line; it must not
-    raise.
-
-    Selection is two-pass so the grid feels balanced but never wastes cells:
-      1. take up to each source's cap (2) in source order — the "one row each"
-         core;
-      2. if that leaves fewer than 8, backfill round-robin from each source's
-         leftovers (results beyond its cap) until 8 are filled or nothing's
-         left. So a thin/empty source is covered by whichever sources have
-         extras, instead of leaving a hole.
+def gather_candidates(track: str, artist: str, progress=None) -> dict[str, list[dict]]:
+    """Query every source and return {source name: [candidate, ...]}, each item
+    {"source", "title", "artist", "lrc"} in that source's own ranking order.
 
     The four sources are queried CONCURRENTLY (one thread each) so the total
-    wait is ~the slowest single source, not the sum — otherwise the deeper
-    per-source query (needed for backfill) makes the grid take too long to
-    appear. A source that errors or exceeds the timeout simply contributes
-    nothing."""
+    wait is ~the slowest single source, not the sum. A source that errors or
+    exceeds the timeout simply contributes an empty list. `progress(name)`
+    (optional) is called once before the sweep, for a live status line; it must
+    not raise."""
     if progress is not None:
         try:
             progress("all sources")
@@ -614,15 +576,33 @@ def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
             try:
                 by_name[name] = fut.result(timeout=25)
             except Exception as e:
-                print(f"[picker] {name} failed: {e}")
+                print(f"[search] {name} failed: {e}")
                 by_name[name] = []
-            print(f"[picker] {name}: {len(by_name[name])} candidate(s)")
+            print(f"[search] {name}: {len(by_name[name])} candidate(s)")
     finally:
-        # Don't block the grid on a straggler source: let any still-running
-        # query finish in the background (its request has its own 10s timeout)
-        # and be discarded. The futures already collected are unaffected.
+        # Don't block on a straggler source: let any still-running query finish
+        # in the background (its request has its own 10s timeout) and be
+        # discarded. The futures already collected are unaffected.
         ex.shutdown(wait=False)
-    per_source = [by_name[name] for name, _cap in CANDIDATE_CAPS]
+    return by_name
+
+
+def build_grid(by_name: dict[str, list[dict]], pin: dict | None = None) -> list[dict]:
+    """Flatten a gather_candidates() result into the ≤ GRID_MAX (8) list the
+    picker renders.
+
+    Selection is two-pass so the grid feels balanced but never wastes cells:
+      1. take up to each source's cap (2) in source order — the "one row each"
+         core;
+      2. if that leaves fewer than 8, backfill round-robin from each source's
+         leftovers (results beyond its cap) until 8 are filled or nothing's
+         left. So a thin/empty source is covered by whichever sources have
+         extras, instead of leaving a hole.
+
+    `pin` (the auto-selected best match) is guaranteed a cell even when its
+    source ranked it below the cap — the user must be able to see, and pick
+    around, whatever we chose to display."""
+    per_source = [by_name.get(name) or [] for name, _cap in CANDIDATE_CAPS]
     caps = [cap for _name, cap in CANDIDATE_CAPS]
     # Pass 1: the per-source core (≤ cap each, in source order).
     out: list[dict] = []
@@ -640,24 +620,40 @@ def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
                 out.append(items[nxt[si]])
                 nxt[si] += 1
                 made_progress = True
-    return out[:GRID_MAX]
+    out = out[:GRID_MAX]
+    if pin is not None and not any(c is pin for c in out):
+        out = [pin] + out[:GRID_MAX - 1]
+    return out
 
 
-# --- Combined cascade ------------------------------------------------------
-def fetch_synced_lyrics_any(track: str, artist: str,
-                            progress=None) -> tuple[str | None, str | None]:
-    """Cache, then each online source, until one returns usable synced lyrics.
+def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
+    """One-shot sweep → picker grid, for a manual (Modify Search) query where
+    there's no automatic selection to make."""
+    return build_grid(gather_candidates(track, artist, progress))
 
-    Returns (lrc, source) where source is "cache" / "QQ" / "Kugou" /
-    "NetEase" / "LRCLIB", or (None, None) if nothing matched. Sources the user
-    previously marked wrong for this song are skipped. Network results are NOT
-    cached
-    here — caching now waits for the user's GREEN confirmation (see
-    save_to_cache).
 
-    `progress`, if given, is called with each source's name just before that
-    source is queried (e.g. for a live "Searching QQ…" status on the display).
-    It must not raise — a failing callback is swallowed so it can't break the
+# --- Combined lookup -------------------------------------------------------
+def fetch_best_lyrics(track: str, artist: str, progress=None
+                      ) -> tuple[str | None, str | None, list[dict] | None]:
+    """Cache, else sweep every source and return the best-scoring match.
+
+    Returns (lrc, source, grid):
+      • cache hit  → (lrc, "cache", None) — no sweep ran, so there's nothing to
+        hand the picker (a cached lyric the user already confirmed shows no
+        feedback buttons, so the picker isn't reachable for it anyway).
+      • sweep      → (best lrc, its source, candidates for the picker) with grid
+        possibly [] when no source had the song. lrc/source are None then.
+
+    Unlike the old first-hit-wins cascade, every candidate from every source is
+    scored against (track, artist) and the highest wins — search engines rank by
+    popularity, not by whether it's the song the phone is actually playing.
+    Sources the user previously marked wrong for this song can't win the
+    automatic pick, but they still appear in the picker so a manual override
+    stays possible. Network results are NOT cached here — caching waits for the
+    user's GREEN confirmation (see save_to_cache).
+
+    `progress`, if given, is called with a status label before the sweep. It
+    must not raise — a failing callback is swallowed so it can't break the
     fetch.
     """
     # 1. Local cache — fastest, no network. A cached entry was already
@@ -665,31 +661,28 @@ def fetch_synced_lyrics_any(track: str, artist: str,
     cached = _cache_load(track, artist)
     if cached:
         print(f"[cache] hit: {artist} — {track}")
-        return cached, "cache"
+        return cached, "cache", None
     print(f"[cache] miss: {artist} — {track}")
+
+    # 2. One concurrent sweep of every source. Its results serve BOTH the
+    #    automatic pick below and the RED picker (no second search).
+    by_name = gather_candidates(track, artist, progress)
 
     rejected = get_rejections(track, artist)
     if rejected:
-        print(f"[lyrics] skipping rejected sources: {rejected}")
+        print(f"[lyrics] not auto-selecting rejected sources: {rejected}")
+    pool = [c for name, items in by_name.items() if name not in rejected
+            for c in items]
 
-    for name, fn in _SOURCES:
-        if name in rejected:
-            continue
-        if progress is not None:
-            try:
-                progress(name)
-            except Exception:
-                pass
-        print(f"[lyrics] {name}: {artist} — {track}")
-        lrc = fn(track, artist)
-        if lrc:
-            print(f"[lyrics] {name} hit (awaiting confirm — not cached yet)")
-            return lrc, name
-
-    # Intentionally NOT caching the negative result — leave the door open
-    # to picking up lyrics if a source adds them later.
-    print("[lyrics] no source had it")
-    return None, None
+    best = best_candidate(pool, track, artist)
+    grid = build_grid(by_name, pin=best)
+    if best is None:
+        # Intentionally NOT caching the negative result — leave the door open
+        # to picking up lyrics if a source adds them later.
+        print("[lyrics] no source had it")
+        return None, None, grid
+    print(f"[lyrics] {best['source']} wins (awaiting confirm — not cached yet)")
+    return best["lrc"], best["source"], grid
 
 
 if __name__ == "__main__":
@@ -699,7 +692,8 @@ if __name__ == "__main__":
         t, a = sys.argv[1], sys.argv[2]
     else:
         t, a = "世间美好与你环环相扣", "柏松"
-    out, src = fetch_synced_lyrics_any(t, a)
+    out, src, cands = fetch_best_lyrics(t, a)
+    print(f"--- {len(cands or [])} candidate(s) cached for the picker")
     if out:
         print(f"--- (from {src})")
         print(out[:500])

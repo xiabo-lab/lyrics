@@ -6,7 +6,14 @@ Run on the Pi (no network or display needed):
 import unittest
 
 from lrclib import LyricLine, parse_lrc
+from lyric_sources import GRID_MAX, best_candidate, build_grid, score_candidate
 from Lyrics_Display import decide_lock, find_current_index
+
+
+def _cand(source, title, artist, lines=20):
+    """A candidate dict with a plausibly-long synced LRC (no stub penalty)."""
+    lrc = "".join(f"[00:{i:02d}.00]line {i}\n" for i in range(lines))
+    return {"source": source, "title": title, "artist": artist, "lrc": lrc}
 
 
 class ParseLrcTests(unittest.TestCase):
@@ -80,6 +87,106 @@ class DecideLockTests(unittest.TestCase):
     def test_no_track_change_timestamp_keeps_waiting_on_stale(self):
         # elapsed_s is None until a track change / attach is recorded.
         self.assertFalse(decide_lock(120000, None, self.FRESH, self.TIMEOUT)[0])
+
+
+class ScoreCandidateTests(unittest.TestCase):
+    def test_exact_match_beats_partial(self):
+        exact = score_candidate(_cand("QQ", "七里香", "周杰伦"), "七里香", "周杰伦")
+        live = score_candidate(_cand("QQ", "七里香 (Live)", "周杰伦"), "七里香", "周杰伦")
+        self.assertGreater(exact, live)
+
+    def test_right_song_wrong_artist_loses(self):
+        right = score_candidate(_cand("QQ", "七里香", "周杰伦"), "七里香", "周杰伦")
+        cover = score_candidate(_cand("QQ", "七里香", "某某某"), "七里香", "周杰伦")
+        self.assertGreater(right, cover)
+
+    def test_wrong_song_right_artist_loses(self):
+        right = score_candidate(_cand("QQ", "七里香", "周杰伦"), "七里香", "周杰伦")
+        other = score_candidate(_cand("QQ", "稻香", "周杰伦"), "七里香", "周杰伦")
+        self.assertGreater(right, other)
+
+    def test_punctuation_case_and_width_ignored(self):
+        a = score_candidate(_cand("QQ", "Hello, World!", "Foo"), "hello world", "foo")
+        self.assertAlmostEqual(a, 1.0 + 0.003, places=6)
+
+    def test_multi_artist_field_matches_one_name(self):
+        c = _cand("Kugou", "千里之外", "周杰伦/费玉清")
+        self.assertGreater(score_candidate(c, "千里之外", "周杰伦"), 0.95)
+
+    def test_stub_lyric_penalized_below_real_match(self):
+        stub = _cand("QQ", "七里香", "周杰伦", lines=2)     # credits-only blob
+        real = _cand("LRCLIB", "七里香", "周杰伦")
+        self.assertGreater(score_candidate(real, "七里香", "周杰伦"),
+                           score_candidate(stub, "七里香", "周杰伦"))
+
+    def test_blank_requested_artist_is_neutral_not_zero(self):
+        # AVRCP sometimes gives no artist; the title alone must still decide.
+        good = score_candidate(_cand("QQ", "七里香", "周杰伦"), "七里香", "")
+        bad = score_candidate(_cand("QQ", "稻香", "周杰伦"), "七里香", "")
+        self.assertGreater(good, bad)
+        self.assertGreater(good, 0.5)
+
+
+class BestCandidateTests(unittest.TestCase):
+    def test_none_on_empty(self):
+        self.assertIsNone(best_candidate([], "t", "a"))
+
+    def test_picks_best_across_sources_not_first(self):
+        cands = [_cand("QQ", "七里香 (Live版)", "群星"),      # QQ's #1, wrong
+                 _cand("Kugou", "七里香", "周杰伦")]          # the real one
+        self.assertIs(best_candidate(cands, "七里香", "周杰伦"), cands[1])
+
+    def test_source_bias_only_breaks_exact_ties(self):
+        cands = [_cand("LRCLIB", "七里香", "周杰伦"),
+                 _cand("QQ", "七里香", "周杰伦")]
+        self.assertIs(best_candidate(cands, "七里香", "周杰伦"), cands[1])
+
+    def test_equal_within_source_keeps_source_ranking(self):
+        cands = [_cand("QQ", "七里香", "周杰伦"), _cand("QQ", "七里香", "周杰伦")]
+        self.assertIs(best_candidate(cands, "七里香", "周杰伦"), cands[0])
+
+
+class BuildGridTests(unittest.TestCase):
+    def _by_name(self, counts):
+        return {name: [_cand(name, f"{name}{i}", "a") for i in range(n)]
+                for name, n in counts.items()}
+
+    def test_two_per_source_in_source_order(self):
+        by_name = self._by_name({"QQ": 4, "Kugou": 4, "NetEase": 4, "LRCLIB": 4})
+        grid = build_grid(by_name)
+        self.assertEqual(len(grid), GRID_MAX)
+        self.assertEqual([c["source"] for c in grid],
+                         ["QQ", "QQ", "Kugou", "Kugou",
+                          "NetEase", "NetEase", "LRCLIB", "LRCLIB"])
+
+    def test_backfills_from_sources_with_extras(self):
+        # Only QQ and LRCLIB answered — they must cover all 8 cells.
+        by_name = self._by_name({"QQ": 4, "Kugou": 0, "NetEase": 0, "LRCLIB": 4})
+        grid = build_grid(by_name)
+        self.assertEqual(len(grid), GRID_MAX)
+        self.assertEqual(sum(c["source"] == "QQ" for c in grid), 4)
+
+    def test_never_exceeds_grid_max(self):
+        by_name = self._by_name({"QQ": 9, "Kugou": 9, "NetEase": 9, "LRCLIB": 9})
+        self.assertEqual(len(build_grid(by_name)), GRID_MAX)
+
+    def test_short_when_nothing_found(self):
+        self.assertEqual(build_grid({}), [])
+
+    def test_pin_kept_when_already_in_grid(self):
+        by_name = self._by_name({"QQ": 4, "Kugou": 4, "NetEase": 4, "LRCLIB": 4})
+        pin = by_name["QQ"][0]
+        grid = build_grid(by_name, pin=pin)
+        self.assertEqual(len(grid), GRID_MAX)
+        self.assertEqual(sum(c is pin for c in grid), 1)
+
+    def test_pin_below_cap_is_forced_into_grid(self):
+        # QQ's 4th result won on score but ranks past the 2-per-source cap.
+        by_name = self._by_name({"QQ": 4, "Kugou": 4, "NetEase": 4, "LRCLIB": 4})
+        pin = by_name["QQ"][3]
+        grid = build_grid(by_name, pin=pin)
+        self.assertEqual(len(grid), GRID_MAX)
+        self.assertIs(grid[0], pin)
 
 
 if __name__ == "__main__":
