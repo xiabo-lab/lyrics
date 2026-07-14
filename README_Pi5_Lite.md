@@ -88,11 +88,13 @@ Pi 5 (it uses the `vc4-kms-v3d` graphics stack `cage` needs).
 sudo apt update && sudo apt full-upgrade -y
 
 sudo apt install -y python3-dbus-next python3-pygame fonts-noto-cjk \
-                    cage seatd python3-requests bluez bluez-tools git
+                    cage seatd python3-requests bluez bluez-tools git uhubctl
 ```
 
 `cage` is the single-app Wayland kiosk compositor; `seatd` gives it a seat
-without a full desktop; `fonts-noto-cjk` provides Chinese glyphs.
+without a full desktop; `fonts-noto-cjk` provides Chinese glyphs. `uhubctl`
+lets the app power-cycle the USB 5G modem's port when connectivity drops (see
+**Auto-recovery** below) — optional, but recommended for in-car use.
 
 Enable `seatd` at boot (on Lite you must do this yourself, or `cage` fails with a
 `libseat`/seat error):
@@ -239,6 +241,26 @@ range, so this is a one-time step per hotspot.
 
 > **iPhone hotspot tip:** if the Pi won't join, toggle **Settings → Personal
 > Hotspot → Maximize Compatibility** on the phone and re-run `wifi.sh`.
+
+---
+
+## Auto-recovery (when the internet drops)
+
+Mobile data in the car is flaky — a 5G hotspot or USB modem can silently stop
+passing traffic. The app watches for this: if **two songs in a row** get no
+lyrics **and** a live reachability check confirms the internet is actually down,
+it recovers automatically:
+
+- **On a USB 5G modem** (e.g. the IK511 plugged in as a USB network adapter):
+  it **power-cycles just that modem's USB port** with `uhubctl`, falling back to
+  a driver re-enumeration if `uhubctl` isn't installed. Only the modem's own port
+  is touched — never the touchscreen or anything else on the bus.
+- **On Wi-Fi** (home Wi-Fi or a Wi-Fi hotspot): it **reboots the Pi**, which
+  re-kicks NetworkManager and the radio.
+
+Two genuinely-unfindable songs on a *working* connection never trigger it — the
+reachability check gates on the internet actually being down. Turn it off with
+`"auto_recover": false` in `config.json`.
 
 ---
 

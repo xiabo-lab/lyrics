@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.8.0"
+APP_VERSION = "1.9.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -109,6 +109,10 @@ PROGRESS_TRACK = (55, 55, 55)  # progress-bar background
 ROTATION_DEG = 0   # 0 for test monitor; 90 once the bar LCD is mounted.
 FLIP_180 = True    # monitor mounted upside-down: turn the whole frame 180°.
 FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
+# Square geometric face (Google "Aldrich") used ONLY for the idle clock's big
+# time readout. Bundled in the repo's fnt/ dir (from the xiabo-lab/pi_dashboard
+# repo). get_font falls back to FONT_PATH if it's missing.
+CLOCK_FONT_PATH = str(INSTALL_DIR / "fnt" / "Aldrich-Regular.ttc")
 FONT_CURRENT = 56   # current/now line (and intro line)
 FONT_TOP = 34       # top context line (previous lyric)
 FONT_BOTTOM = 34    # bottom context line (next lyric)
@@ -127,6 +131,12 @@ NIGHT_START_HOUR = 19     # local hour night (dimmed) brightness begins
 NIGHT_BRIGHTNESS = 0.55   # 0..1 multiplier applied to all colours at night
 MAX_LINE_WIDTH_FRAC = 0.9  # shrink any line wider than this frac of the screen
 AUTOCONNECT = True   # on boot/disconnect, have the Pi reconnect to the paired phone
+
+# When two songs IN A ROW get no lyrics AND the public internet is actually
+# unreachable, connectivity is genuinely down — auto-recover it: power-cycle
+# the USB 5G modem (IK511) if that's how we're online, or reboot the Pi if
+# we're on Wi-Fi. See ConnectivityRecovery. Set False to disable entirely.
+AUTO_RECOVER = True
 
 # Bluetooth A2DP buffers ~200–500ms of audio, so iPhone's AVRCP Position
 # is "ahead" of what you actually hear from the car stereo. Subtract this
@@ -229,6 +239,7 @@ _CONFIG_DEFAULTS = {
     "max_line_width_frac": MAX_LINE_WIDTH_FRAC,
     "autoconnect": AUTOCONNECT,
     "flip_180": FLIP_180,
+    "auto_recover": AUTO_RECOVER,
 }
 
 
@@ -294,6 +305,7 @@ def apply_config() -> None:
     global TOP_BOLD, BOTTOM_BOLD
     global PROGRESS_BAR, DIM_ENABLED, DAY_START_HOUR, NIGHT_START_HOUR
     global NIGHT_BRIGHTNESS, MAX_LINE_WIDTH_FRAC, AUTOCONNECT, FLIP_180
+    global AUTO_RECOVER
     cfg = load_config()
     LATENCY_OFFSET_MS = cfg["latency_offset_ms"]
     LEAD_OFFSET_MS = cfg["lead_offset_ms"]
@@ -319,6 +331,7 @@ def apply_config() -> None:
     MAX_LINE_WIDTH_FRAC = cfg["max_line_width_frac"]
     AUTOCONNECT = cfg["autoconnect"]
     FLIP_180 = cfg["flip_180"]
+    AUTO_RECOVER = cfg["auto_recover"]
 
 
 def write_config_values(updates: dict) -> None:
@@ -421,7 +434,7 @@ class State:
 # Friendly names for the on-screen "Searching …" status, keyed by the labels
 # lyric_sources reports through its progress callback. Unknown names fall back
 # to themselves.
-SOURCE_LABELS = {"all sources": "all sources", "QQ": "QQ Music",
+SOURCE_LABELS = {"all sources": "lyrics", "QQ": "QQ Music",
                  "Kugou": "Kugou", "NetEase": "NetEase", "LRCLIB": "LRCLIB"}
 
 
@@ -453,6 +466,7 @@ async def fetch_lyrics_for(state: State, title: str, artist: str) -> None:
         state.lyrics_status = "(network error)"
         state.awaiting_feedback = False
         state.candidates, state.candidates_sig = [], None
+        RECOVERY.record_result(title, artist, found=False)
         return
 
     # cands is None on a cache hit — no sweep ran, so drop whatever the previous
@@ -470,6 +484,7 @@ async def fetch_lyrics_for(state: State, title: str, artist: str) -> None:
         state.lyrics_source = None
         state.awaiting_feedback = False
         print("[lyrics] none found")
+        RECOVERY.record_result(title, artist, found=False)
         return
 
     state.lines = parse_lrc(lrc)
@@ -481,6 +496,7 @@ async def fetch_lyrics_for(state: State, title: str, artist: str) -> None:
     # buttons.
     state.awaiting_feedback = source != "cache"
     print(f"[lyrics] {len(state.lines)} lines loaded (source={source})")
+    RECOVERY.record_result(title, artist, found=True)
 
 
 class AvrcpWatcher:
@@ -1288,6 +1304,242 @@ class NetworkStatus:
             return False
 
 
+class ConnectivityRecovery:
+    """Auto-recover the car's internet when it silently dies mid-drive.
+
+    The Pi gets online either over Wi-Fi (home, phone hotspot) or through a TCL
+    LINKPORT IK511 5G modem plugged in as a USB network adapter. Outdoors the
+    IK511 hangs at random and stops passing traffic; the only reliable fix is to
+    power-cycle its USB port. We can't read the modem's state, so we infer an
+    outage from a behavioural signal the display already produces: lyrics for a
+    *new* song are always fetched over the network, so when two songs IN A ROW
+    come up empty, the internet is a prime suspect.
+
+    To avoid acting on a false alarm (two genuinely obscure songs on healthy
+    Wi-Fi at home), we confirm with a real reachability probe before doing
+    anything. Only if the internet is actually unreachable do we recover:
+      - online via the USB modem → power-cycle just that USB port
+      - online via Wi-Fi         → reboot the Pi (re-kicks NetworkManager + radio)
+
+    Failures are counted per DISTINCT song, so a RED-button re-search of the
+    same track can't inflate the streak, and a cooldown stops us thrashing the
+    modem/reboot if the outage persists. Recovery runs in a worker thread so the
+    render loop never stalls. All of this is gated by the AUTO_RECOVER config."""
+
+    FAIL_THRESHOLD = 2        # consecutive lyric-less songs before we investigate
+    COOLDOWN_S = 90.0         # min seconds between recovery actions (anti-thrash)
+    REBIND_SETTLE_S = 2.0     # pause between USB unbind and rebind
+
+    def __init__(self):
+        self._fail_streak = 0
+        self._last_sig: tuple | None = None   # last DISTINCT song we counted
+        self._busy = False                    # a recovery is already scheduled/running
+        self._last_action_mono = 0.0          # monotonic time of the last action
+
+    def record_result(self, title: str, artist: str, found: bool) -> None:
+        """Call at the end of every lyric fetch. `found` is True when lyrics were
+        shown (cache OR network), False on 'not found' / network error. A cache
+        hit counts as found — if some songs still resolve, the internet isn't the
+        problem, so the streak resets."""
+        if not AUTO_RECOVER:
+            return
+        sig = (title, artist)
+        if found:
+            self._fail_streak = 0
+            self._last_sig = sig
+            return
+        if sig == self._last_sig:
+            return                      # same song re-searched — don't double-count
+        self._last_sig = sig
+        self._fail_streak += 1
+        print(f"[recover] lyric-less song "
+              f"{self._fail_streak}/{self.FAIL_THRESHOLD}: {artist} — {title}")
+        if self._fail_streak >= self.FAIL_THRESHOLD and not self._busy:
+            self._fail_streak = 0       # reset now; next action needs a fresh streak
+            self._busy = True
+            asyncio.create_task(self._recover())
+
+    async def _recover(self) -> None:
+        """Run the blocking recovery off the event loop so rendering keeps up."""
+        try:
+            await asyncio.to_thread(self._recover_blocking)
+        except Exception as e:
+            print(f"[recover] error: {e}")
+        finally:
+            self._busy = False
+
+    def _recover_blocking(self) -> None:
+        now = time.monotonic()
+        if now - self._last_action_mono < self.COOLDOWN_S:
+            print("[recover] within cooldown — skipping")
+            return
+        # Confirm the outage: two empty songs on WORKING internet just means the
+        # lyrics genuinely aren't out there, and no reboot will conjure them.
+        if NetworkStatus._probe():
+            print("[recover] internet reachable — lyrics simply missing, no action")
+            return
+        self._last_action_mono = now
+        mode = self._decide_mode()
+        print(f"[recover] internet unreachable, connected via {mode} — recovering")
+        if mode == "wifi":
+            self._reboot()
+        else:
+            self._power_cycle_usb()
+
+    # ---- connection-type detection ----------------------------------------
+    @classmethod
+    def _decide_mode(cls) -> str:
+        """'wifi' or 'usb' — how the Pi is (was) reaching the internet."""
+        iface = cls._default_route_iface()
+        if iface:
+            # wlan0 / wlp* are Wi-Fi; usb0 / eth1 (the IK511) are the USB modem.
+            return "wifi" if iface.startswith("wl") else "usb"
+        # No default route — typical once the link has dropped. If we're still
+        # associated to a Wi-Fi SSID it's a Wi-Fi problem; otherwise the modem.
+        return "wifi" if NetworkStatus._ssid() else "usb"
+
+    @staticmethod
+    def _default_route_iface() -> str | None:
+        """Interface carrying the default route, e.g. 'wlan0' / 'usb0', or None."""
+        try:
+            out = subprocess.run(["ip", "route", "show", "default"],
+                                 capture_output=True, text=True,
+                                 timeout=4).stdout
+        except Exception:
+            return None
+        for line in out.splitlines():
+            parts = line.split()
+            if "dev" in parts:
+                return parts[parts.index("dev") + 1]
+        return None
+
+    # ---- Wi-Fi recovery ----------------------------------------------------
+    @staticmethod
+    def _reboot() -> None:
+        """Reboot the Pi. Runs as root under systemd, so plain systemctl works;
+        fall back to sudo -n, then /sbin/reboot for a non-root/odd launch."""
+        last = None
+        for cmd in (["/usr/bin/systemctl", "reboot"],
+                    ["sudo", "-n", "/usr/bin/systemctl", "reboot"],
+                    ["/sbin/reboot"]):
+            try:
+                subprocess.run(cmd, check=True, timeout=15)
+                print("[recover] reboot requested")
+                return
+            except Exception as e:
+                last = e
+        print(f"[recover] reboot failed ({last})")
+
+    # ---- USB-modem recovery ------------------------------------------------
+    @classmethod
+    def _power_cycle_usb(cls) -> None:
+        """Power-cycle just the IK511's USB port. Prefers a true VBUS cycle via
+        uhubctl (if installed); otherwise forces a driver re-enumeration by
+        unbinding/rebinding the device — which clears most modem hangs without
+        cutting power. Only ever touches the modem's own port, never the
+        touchscreen or anything else."""
+        busid = cls._modem_busid()
+        if not busid:
+            print("[recover] USB modem port not found — rebooting as last resort")
+            cls._reboot()
+            return
+        print(f"[recover] power-cycling USB modem at {busid}")
+        # uhubctl ships in /usr/sbin, which a restricted systemd/cage PATH may
+        # omit — so fall back to the absolute path rather than miss the real
+        # VBUS power cycle and silently drop to rebind.
+        uhubctl = shutil.which("uhubctl")
+        if not uhubctl and os.path.exists("/usr/sbin/uhubctl"):
+            uhubctl = "/usr/sbin/uhubctl"
+        if uhubctl and cls._uhubctl_cycle(uhubctl, busid):
+            return
+        cls._rebind_usb(busid)
+
+    @classmethod
+    def _modem_busid(cls) -> str | None:
+        """USB bus-id (e.g. '1-1.2') of the modem's port. Prefer the interface
+        that holds the default route; fall back to any USB-backed, non-Wi-Fi
+        network interface (the modem, when its route has already dropped)."""
+        candidates: list[str] = []
+        drt = cls._default_route_iface()
+        if drt and not drt.startswith("wl"):
+            candidates.append(drt)
+        try:
+            for name in sorted(os.listdir("/sys/class/net")):
+                if name == "lo" or name.startswith("wl") or name in candidates:
+                    continue
+                candidates.append(name)
+        except OSError:
+            pass
+        for iface in candidates:
+            busid = cls._usb_busid_for_iface(iface)
+            if busid:
+                return busid
+        return None
+
+    @staticmethod
+    def _usb_busid_for_iface(iface: str) -> str | None:
+        """Resolve a network interface to the bus-id of its backing USB device,
+        or None if it isn't USB-backed."""
+        try:
+            dev = os.path.realpath(f"/sys/class/net/{iface}/device")
+        except OSError:
+            return None
+        if "/usb" not in dev:
+            return None
+        # Walk up to the USB *device* directory (the one carrying idVendor);
+        # its basename is the bus-id the usb driver / uhubctl expect.
+        path = dev
+        for _ in range(8):
+            if os.path.exists(os.path.join(path, "idVendor")):
+                return os.path.basename(path)
+            parent = os.path.dirname(path)
+            if parent == path:
+                break
+            path = parent
+        return None
+
+    @staticmethod
+    def _uhubctl_cycle(uhubctl: str, busid: str) -> bool:
+        """True on a successful uhubctl power cycle of the port carrying `busid`.
+        The port number is the trailing segment of the bus-id ('1-1.2' → hub
+        '1-1', port '2'); a root-hub port like '1-1' → hub '1', port '1'."""
+        sep = "." if "." in busid else "-"
+        loc, _, port = busid.rpartition(sep)
+        if not loc or not port:
+            return False
+        try:
+            subprocess.run(
+                [uhubctl, "-l", loc, "-p", port, "-a", "cycle", "-d", "2"],
+                check=True, timeout=30, capture_output=True, text=True)
+            print(f"[recover] uhubctl cycled hub {loc} port {port}")
+            return True
+        except Exception as e:
+            print(f"[recover] uhubctl failed ({e}) — falling back to rebind")
+            return False
+
+    @classmethod
+    def _rebind_usb(cls, busid: str) -> None:
+        """Force a USB re-enumeration by unbinding then rebinding the device's
+        driver. Reloads the modem's CDC/RNDIS driver and usually clears a hung
+        IK511 without needing VBUS switching. Reboots as a last resort if the
+        sysfs write isn't permitted."""
+        base = "/sys/bus/usb/drivers/usb"
+        try:
+            with open(f"{base}/unbind", "w") as f:
+                f.write(busid)
+            time.sleep(cls.REBIND_SETTLE_S)
+            with open(f"{base}/bind", "w") as f:
+                f.write(busid)
+            print(f"[recover] re-enumerated USB device {busid}")
+        except OSError as e:
+            print(f"[recover] USB rebind failed ({e}) — rebooting as last resort")
+            cls._reboot()
+
+
+# Module-wide singleton, updated from fetch_lyrics_for after every fetch.
+RECOVERY = ConnectivityRecovery()
+
+
 def decide_lock(real_ms, elapsed_s, fresh_max_ms, timeout_s):
     """Pure policy: should a just-read Position anchor a freshly-started
     track, and why? Returns (should_lock, reason).
@@ -1343,16 +1595,54 @@ def find_current_index(lines: list[LyricLine], t_ms: int) -> int:
 _FONT_CACHE: dict = {}
 
 
-def get_font(size: int, bold: bool):
+def get_font(size: int, bold: bool, font_path: str = FONT_PATH):
     """Memoized font loader. Bold is synthesized via set_bold() so we don't
-    depend on a separate bold .ttc being installed."""
-    key = (size, bold)
+    depend on a separate bold .ttc being installed. font_path selects a
+    non-default face (e.g. the LED clock font); a missing or unreadable file
+    silently falls back to FONT_PATH so the display never blanks."""
+    key = (font_path, size, bold)
     font = _FONT_CACHE.get(key)
     if font is None:
-        font = pygame.font.Font(FONT_PATH, size)
+        try:
+            font = pygame.font.Font(font_path, size)
+        except (OSError, RuntimeError, pygame.error):
+            if font_path != FONT_PATH:
+                print(f"[font] {font_path} unusable — using default")
+            font = pygame.font.Font(FONT_PATH, size)
         font.set_bold(bold)
         _FONT_CACHE[key] = font
     return font
+
+
+# Per-source badge images (in the repo root) shown in each picker result cell so
+# you can tell at a glance which service a candidate came from. Keyed by the
+# candidate "source" values lyric_sources emits.
+SOURCE_ICON_FILES = {
+    "QQ":     "qq music icon.jpg",
+    "Kugou":  "kugou icon.jpg",
+    "NetEase": "netease icon.png",
+    "LRCLIB": "lrclib icon.png",
+}
+_ICON_CACHE: dict = {}   # (source, size) -> Surface | None
+
+
+def get_source_icon(source, size: int):
+    """Memoized loader for a source badge scaled to size×size px. Returns None
+    (drawn as nothing) if the source is unknown or its file is missing/unreadable
+    — a missing icon must never break the picker."""
+    key = (source, size)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    icon = None
+    fname = SOURCE_ICON_FILES.get(source)
+    if fname:
+        try:
+            img = pygame.image.load(str(INSTALL_DIR / fname)).convert_alpha()
+            icon = pygame.transform.smoothscale(img, (size, size))
+        except (OSError, pygame.error) as e:
+            print(f"[icon] {fname} load failed: {e}")
+    _ICON_CACHE[key] = icon
+    return icon
 
 
 def scale_color(color, factor):
@@ -1375,19 +1665,59 @@ def brightness_factor() -> float:
     return 1.0 if is_day else NIGHT_BRIGHTNESS
 
 
-def draw_line(screen, text, size, bold, color, center_xy, max_len, rotate_deg):
+def draw_line(screen, text, size, bold, color, center_xy, max_len, rotate_deg,
+              font_path=FONT_PATH):
     """Render one centered line, shrinking the font if the text would exceed
-    max_len px — so long lines never clip (one quick read per line)."""
+    max_len px — so long lines never clip (one quick read per line). font_path
+    picks a non-default face (e.g. the LED clock font)."""
     if not text:
         return
-    surf = get_font(size, bold).render(text, True, color)
+    surf = get_font(size, bold, font_path).render(text, True, color)
     if max_len and surf.get_width() > max_len:
         shrunk = max(8, int(size * max_len / surf.get_width()))
         if shrunk < size:
-            surf = get_font(shrunk, bold).render(text, True, color)
+            surf = get_font(shrunk, bold, font_path).render(text, True, color)
     if rotate_deg:
         surf = pygame.transform.rotate(surf, rotate_deg)
     screen.blit(surf, surf.get_rect(center=center_xy))
+
+
+def draw_clock(screen, segments, size, bold, center_xy, rotate_deg, font_path):
+    """Render a clock as coloured segments — `segments` is a list of (text, rgb),
+    e.g. HH red / ':' white / MM yellow / ':' white / SS green — on a MONOSPACED
+    grid so the time never drifts as digits change.
+
+    Every digit gets the same cell width (the widest of 0-9) and is centered in
+    it, so a proportional face like Aldrich (where '1' is narrower than '8')
+    still keeps each digit and colon pinned to a fixed spot — only the glyph
+    swaps. Colons keep their own natural cell width.
+
+    Horizontal placement uses the grid's FIXED box (constant width → the clock
+    never moves). Vertical placement uses the glyph INK (get_bounding_rect), not
+    the font's padded line box, so uneven top/bottom padding still gives equal
+    space above and below. (rotate_deg is 0 for the clock's monitor.)"""
+    font = get_font(size, bold, font_path)
+    digit_w = max(font.size(str(d))[0] for d in range(10))
+    chars = [(ch, col) for text, col in segments for ch in text]
+    if not chars:
+        return
+
+    def cell_w(ch):
+        return digit_w if ch.isdigit() else font.size(ch)[0]
+
+    total_w = sum(cell_w(ch) for ch, _ in chars)
+    strip = pygame.Surface((total_w, font.get_height()), pygame.SRCALPHA)
+    x = 0
+    for ch, col in chars:
+        cw = cell_w(ch)
+        g = font.render(ch, True, col)
+        strip.blit(g, (x + (cw - g.get_width()) // 2, 0))  # centre glyph in its cell
+        x += cw
+    if rotate_deg:
+        strip = pygame.transform.rotate(strip, rotate_deg)
+    ink = strip.get_bounding_rect()
+    cx, cy = center_xy
+    screen.blit(strip, (cx - strip.get_width() // 2, cy - ink.centery))
 
 
 def _draw_progress(screen, w, curr_center, lines, idx, t_ms, bf):
@@ -1485,13 +1815,32 @@ def _fit_text(text: str, font, max_w: int) -> str:
     return (text + "…") if text else "…"
 
 
+_LRC_TS_RE = re.compile(r"\[(\d+):(\d+)(?:[.:]\d+)?\]")
+
+
+def _lrc_duration_ms(lrc: str) -> int:
+    """The lyric's time span = its largest [mm:ss] timestamp, in ms (0 if none).
+    Metadata tags like [ti:...]/[offset:0] never match — they aren't mm:ss."""
+    best = 0
+    for m in _LRC_TS_RE.finditer(lrc or ""):
+        ms = int(m.group(1)) * 60000 + int(m.group(2)) * 1000
+        if ms > best:
+            best = ms
+    return best
+
+
+def _fmt_mmss(ms: int) -> str:
+    s = ms // 1000
+    return f"{s // 60}:{s % 60:02d}"
+
+
 def draw_picker(screen, w, h, candidates) -> None:
     """The consolidated multi-source candidate grid (RED button). Each filled
     cell is a tappable lyric option showing the song title (big) and artist
-    (smaller), centred so it reads from across the car; empty cells (when fewer
-    than 9 matched) are dimmed. The source isn't shown — dropping that chip
-    frees the whole cell for larger text (still tracked internally for caching).
-    Drawn before the FLIP_180 flip, like the menus (taps inverted to match)."""
+    (smaller) centred so it reads from across the car, with a small source badge
+    in the lower-right corner and the lyric's time length in the lower-left;
+    empty cells (when fewer than 9 matched) are dimmed. Drawn before the FLIP_180
+    flip, like the menus (taps inverted to match)."""
     screen.fill(BG)
     cells = _picker_layout(w, h)
     cell_h = cells[0].h if cells else h // 3
@@ -1528,6 +1877,25 @@ def draw_picker(screen, w, h, candidates) -> None:
         screen.blit(ts, ts.get_rect(midtop=(rect.centerx, y0)))
         screen.blit(a_s, a_s.get_rect(
             midtop=(rect.centerx, y0 + ts.get_height() + gap)))
+        # Small source badge tucked into the cell's lower-right corner so you can
+        # see which service each candidate came from at a glance.
+        icon = get_source_icon(c.get("source"), max(18, int(cell_h * 0.24)))
+        pad = max(2, rect.w // 80)       # small inset → tucked into the corner
+        if icon:
+            screen.blit(icon, icon.get_rect(
+                bottomright=(rect.right - pad, rect.bottom - pad)))
+        # Lyric time length (span of the synced LRC) in the lower-LEFT corner, so
+        # you can sanity-check a candidate against how long the song runs.
+        # Cached on the candidate dict — the LRC doesn't change while the picker
+        # is open, so we parse it once, not every frame.
+        dur = c.get("_dur_ms")
+        if dur is None:
+            dur = c["_dur_ms"] = _lrc_duration_ms(c.get("lrc", ""))
+        if dur > 0:
+            dur_font = get_font(max(16, int(cell_h * 0.16)), False)
+            ds = dur_font.render(_fmt_mmss(dur), True, (150, 155, 165))
+            screen.blit(ds, ds.get_rect(
+                bottomleft=(rect.left + pad, rect.bottom - pad)))
 
 
 # ---- Pinyin IME (Modify Search → 中 mode) ----------------------------------
@@ -3240,22 +3608,33 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                       CURRENT_BOLD, c_current, curr_pos, max_len,
                                       ROTATION_DEG)
                     else:
-                        # Idle (no track at all): a clock instead of a bare
-                        # "(waiting for music)". Top = date MM/DD/YYYY,
-                        # middle = 24h time HH:MM:SS rendered big (90px, the
-                        # current-line size) so the clock is the focal point,
-                        # bottom = the waiting note. strftime is re-evaluated
-                        # every frame so the seconds tick live.
+                        # Idle (no track at all): just the 24h HH:MM:SS clock,
+                        # grown to fill 3/4 of the screen, with the hour RED,
+                        # minute YELLOW, second GREEN (colons white). draw_clock
+                        # lays the digits on a fixed monospaced grid (so the time
+                        # never drifts as digits change) and centers by glyph ink
+                        # (equal top/bottom spacing). Size off that same grid width
+                        # — 6 max-width digit cells + 2 colon cells — measured at a
+                        # reference size, so the widest possible time fills ~3/4.
                         now_local = time.localtime()
-                        draw_line(screen, time.strftime("%m/%d/%Y", now_local),
-                                  FONT_TOP, TOP_BOLD, c_prev, prev_pos,
-                                  max_len, ROTATION_DEG)
-                        draw_line(screen, time.strftime("%H:%M:%S", now_local),
-                                  90, CURRENT_BOLD, c_current,
-                                  curr_pos, max_len, ROTATION_DEG)
-                        draw_line(screen, "Waiting for Music",
-                                  FONT_BOTTOM, BOTTOM_BOLD, c_next, next_pos,
-                                  max_len, ROTATION_DEG)
+                        ref = get_font(200, CURRENT_BOLD, CLOCK_FONT_PATH)
+                        grid_w = (max(ref.size(str(d))[0] for d in range(10)) * 6
+                                  + ref.size(":")[0] * 2)
+                        clock_size = max(8, int(200 * min(w * 0.75 / grid_w,
+                                                          h * 0.75 / ref.get_height())))
+                        colon = scale_color(COLOR_BY_NAME["white"], bf)
+                        segments = [
+                            (time.strftime("%H", now_local),
+                             scale_color(COLOR_BY_NAME["red"], bf)),
+                            (":", colon),
+                            (time.strftime("%M", now_local),
+                             scale_color(COLOR_BY_NAME["yellow"], bf)),
+                            (":", colon),
+                            (time.strftime("%S", now_local),
+                             scale_color(COLOR_BY_NAME["green"], bf)),
+                        ]
+                        draw_clock(screen, segments, clock_size, CURRENT_BOLD,
+                                   curr_pos, ROTATION_DEG, CLOCK_FONT_PATH)
 
                 # Ask for a verdict on fresh (uncached) lyrics. Drawn before the
                 # flip so the buttons orient with the lyrics.
@@ -3284,7 +3663,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 # Gathering candidates after a RED tap — banner near the bottom
                 # so the user knows the grid is on its way.
                 if picker_searching:
-                    draw_line(screen, "♪ Searching all sources…", FONT_SYNC,
+                    draw_line(screen, "♪ Searching lyrics…", FONT_SYNC,
                               True, scale_color((120, 200, 255), bf),
                               (w // 2, h - FONT_SYNC), max_len, ROTATION_DEG)
 

@@ -223,7 +223,11 @@ def _netease_lyric(song_id: int, timeout: float = 10) -> str | None:
 
 
 # --- QQ Music (QQ音乐) ------------------------------------------------------
-QQ_SEARCH = "https://c.y.qq.com/soso/fcgi-bin/client_search_cp"
+# Search via the unified musicu.fcg service. The older client_search_cp endpoint
+# started returning HTTP 500 (empty body) for EVERY query around 2026-07, which
+# silently dropped QQ from all results; musicu.fcg is the current desktop-client
+# search API and returns songmids the lyric endpoint below still resolves.
+QQ_SEARCH = "https://u.y.qq.com/cgi-bin/musicu.fcg"
 QQ_LYRIC = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
 QQ_HEADERS = {
     "Referer": "https://y.qq.com/",
@@ -310,14 +314,25 @@ def _kugou_lyric(song_hash: str, timeout: float = 10) -> str | None:
 # the picker grid so RED needs no second network round-trip. Balanced 2 per
 # source across the 4 sources (sum = 8, fills the 8 result cells; the 9th grid
 # cell is Modify Search).
-CANDIDATE_CAPS = (("QQ", 2), ("Kugou", 2), ("NetEase", 2), ("LRCLIB", 2))
+CANDIDATE_CAPS = (("QQ", 1), ("Kugou", 2), ("NetEase", 2), ("LRCLIB", 2))
 # The picker shows at most this many results (8 cells; cell 9 is the button).
 GRID_MAX = 8
+# Picker grid: drop any candidate whose title+artist similarity to the query is
+# below this. Search engines (esp. QQ) happily return a same-named but totally
+# different song — e.g. the Japanese "ドラえもんのうた" for a Mandarin "多啦A夢 / 陳慧琳"
+# — and those cluttered the picker. Loose enough to keep legitimate
+# same-artist/alternate-title matches; the auto-pick is scored separately and is
+# always pinned into the grid regardless of this filter.
+GRID_RELEVANCE_MIN = 0.3
 # Query each source a little deeper than its 2-cap so that when a source
 # returns fewer than 2 (or none), we can BACKFILL the empty cells from the
 # sources that have extras and still fill up to 8. 4 lets two working sources
 # cover all 8 on their own.
 CANDIDATE_QUERY_LIMIT = 4
+# Per-source overrides of CANDIDATE_QUERY_LIMIT. QQ's search relevance is poor
+# (it over-returns unrelated same-name songs), so take ONLY its single top hit
+# rather than deep-querying it — keeps QQ noise out and never backfills from QQ.
+CANDIDATE_QUERY_LIMITS = {"QQ": 1}
 
 
 # --- Match scoring ----------------------------------------------------------
@@ -402,6 +417,14 @@ def score_candidate(cand: dict, track: str, artist: str) -> float:
     return score + SOURCE_BIAS.get(cand.get("source", ""), 0.0)
 
 
+def _relevance(cand: dict, track: str, artist: str) -> float:
+    """Title+artist similarity only (no stub penalty / source bias) — used to
+    keep obviously-unrelated search hits out of the picker grid, so a short but
+    correct lyric isn't judged by its length here."""
+    return (TITLE_WEIGHT * _sim(_norm(cand.get("title", "")), _norm(track))
+            + ARTIST_WEIGHT * _artist_sim(cand.get("artist", ""), artist))
+
+
 def best_candidate(cands: list[dict], track: str, artist: str) -> dict | None:
     """The highest-scoring candidate, or None for an empty list."""
     if not cands:
@@ -457,24 +480,38 @@ def _candidates(source: str, search_fn, lyric_fn,
 
 def _qq_search_list(track: str, artist: str, limit: int,
                     timeout: float = 10) -> list[tuple[str, str, str]]:
-    """Up to `limit` (songmid, title, artist) QQ matches for (track, artist)."""
+    """Up to `limit` (songmid, title, artist) QQ matches for (track, artist).
+
+    Uses the musicu.fcg SearchCgiService: the request is a JSON `data` blob and
+    the matches come back at req_1.data.body.song.list, each carrying `mid`
+    (the songmid the lyric endpoint needs), `name`/`title`, and `singer`."""
     query = f"{track} {artist}".strip()
     if not query:
         return []
+    body = {
+        "req_1": {
+            "method": "DoSearchForQQMusicDesktop",
+            "module": "music.search.SearchCgiService",
+            "param": {"num_per_page": max(limit, 1), "page_num": 1,
+                      "query": query, "search_type": 0},
+        }
+    }
     r = requests.get(
         QQ_SEARCH,
-        params={"w": query, "format": "json", "n": max(limit, 1), "p": 1},
+        params={"format": "json", "data": json.dumps(body)},
         headers=QQ_HEADERS, timeout=timeout)
     r.raise_for_status()
-    songs = (((r.json().get("data") or {}).get("song")) or {}).get("list") or []
+    songs = ((((r.json().get("req_1") or {}).get("data") or {})
+              .get("body") or {}).get("song") or {}).get("list") or []
     out = []
     for s in songs[:limit]:
-        mid = s.get("songmid")
+        mid = s.get("mid")
         if not mid:
             continue
         names = "/".join(x.get("name", "") for x in (s.get("singer") or [])
                          if x.get("name"))
-        out.append((mid, s.get("songname") or track, names or artist))
+        out.append((mid, s.get("name") or s.get("title") or track,
+                    names or artist))
     return out
 
 
@@ -569,8 +606,9 @@ def gather_candidates(track: str, artist: str, progress=None) -> dict[str, list[
     by_name: dict[str, list[dict]] = {}
     ex = concurrent.futures.ThreadPoolExecutor(max_workers=len(CANDIDATE_CAPS))
     try:
-        futs = {name: ex.submit(_CANDIDATE_FNS[name], track, artist,
-                                CANDIDATE_QUERY_LIMIT)
+        futs = {name: ex.submit(
+                    _CANDIDATE_FNS[name], track, artist,
+                    CANDIDATE_QUERY_LIMITS.get(name, CANDIDATE_QUERY_LIMIT))
                 for name, _cap in CANDIDATE_CAPS}
         for name, fut in futs.items():
             try:
@@ -587,7 +625,8 @@ def gather_candidates(track: str, artist: str, progress=None) -> dict[str, list[
     return by_name
 
 
-def build_grid(by_name: dict[str, list[dict]], pin: dict | None = None) -> list[dict]:
+def build_grid(by_name: dict[str, list[dict]], pin: dict | None = None,
+               track: str = "", artist: str = "") -> list[dict]:
     """Flatten a gather_candidates() result into the ≤ GRID_MAX (8) list the
     picker renders.
 
@@ -603,6 +642,13 @@ def build_grid(by_name: dict[str, list[dict]], pin: dict | None = None) -> list[
     source ranked it below the cap — the user must be able to see, and pick
     around, whatever we chose to display."""
     per_source = [by_name.get(name) or [] for name, _cap in CANDIDATE_CAPS]
+    # Drop obviously-unrelated hits so the picker only offers plausible matches
+    # (preserving each source's own order). Skip when there's nothing to compare
+    # against (a blank query).
+    if track or artist:
+        per_source = [[c for c in items
+                       if _relevance(c, track, artist) >= GRID_RELEVANCE_MIN]
+                      for items in per_source]
     caps = [cap for _name, cap in CANDIDATE_CAPS]
     # Pass 1: the per-source core (≤ cap each, in source order).
     out: list[dict] = []
@@ -629,7 +675,8 @@ def build_grid(by_name: dict[str, list[dict]], pin: dict | None = None) -> list[
 def search_candidates(track: str, artist: str, progress=None) -> list[dict]:
     """One-shot sweep → picker grid, for a manual (Modify Search) query where
     there's no automatic selection to make."""
-    return build_grid(gather_candidates(track, artist, progress))
+    return build_grid(gather_candidates(track, artist, progress),
+                      track=track, artist=artist)
 
 
 # --- Combined lookup -------------------------------------------------------
@@ -675,7 +722,7 @@ def fetch_best_lyrics(track: str, artist: str, progress=None
             for c in items]
 
     best = best_candidate(pool, track, artist)
-    grid = build_grid(by_name, pin=best)
+    grid = build_grid(by_name, pin=best, track=track, artist=artist)
     if best is None:
         # Intentionally NOT caching the negative result — leave the door open
         # to picking up lyrics if a source adds them later.

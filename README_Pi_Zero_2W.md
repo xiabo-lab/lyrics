@@ -82,9 +82,12 @@ that keeps your eyes on the road.
 | File | Purpose |
 |------|---------|
 | `Lyrics_Display.py` | The app: BlueZ/AVRCP watcher, sync clock, pygame renderer, on-screen settings + Bluetooth pairing menu. |
-| `lyric_sources.py` | Multi-source synced-lyric fetcher with on-disk cache, per-song rejections, and the source cascade. |
+| `lyric_sources.py` | Multi-source synced-lyric fetcher (QQ / Kugou / NetEase / LRCLIB): one concurrent sweep, best-match scored, with on-disk cache and the RED-button picker grid. |
 | `lrclib.py` | LRCLIB client + the `.lrc` parser (`parse_lrc`) and `LyricLine` type. |
 | `config.json` | Live, hot-reloaded tuning (offsets, fonts, colours, brightness, …). |
+| `fnt/` | Extra fonts for the idle clock (`Aldrich-Regular.ttc`, `advanced_led_board-7.ttc`). Missing → the clock falls back to Noto. |
+| `*icon.png` / `*icon.jpg` | Per-source badges (QQ / Kugou / NetEase / LRCLIB) shown on picker results. |
+| `pinyin_table.json` | Offline pinyin→Hanzi table for the Modify Search IME. |
 | `bt-agent.service` | systemd unit for the headless Bluetooth pairing agent. |
 | `99-carlyric-ignore-avrcp-pointer.rules` | udev rule so the phone's AVRCP device isn't treated as a mouse (stops a stray cursor). |
 | `wifi.sh` | One-shot helper to join a new Wi-Fi network via NetworkManager. |
@@ -132,11 +135,13 @@ the Pi to boot to console (`sudo systemctl set-default multi-user.target`).
 ```bash
 sudo apt update
 sudo apt install -y python3-dbus-next python3-pygame fonts-noto-cjk \
-                    cage seatd python3-requests bluez bluez-tools
+                    cage seatd python3-requests bluez bluez-tools uhubctl
 ```
 
 `cage` is a single-app Wayland kiosk compositor; `seatd` gives it a seat without
-a full desktop. `fonts-noto-cjk` is required for Chinese glyphs.
+a full desktop. `fonts-noto-cjk` is required for Chinese glyphs. `uhubctl` lets
+the app power-cycle the USB 5G modem's port on a connectivity drop (see
+**Auto-recovery** below) — optional, but recommended for in-car use.
 
 Enable `seatd` so it starts at boot (on a Lite/console image you must enable it
 yourself, or `cage` fails with a `libseat`/seat error):
@@ -278,6 +283,26 @@ under *Wi-Fi* below).
 
 ---
 
+## Auto-recovery (when the internet drops)
+
+Mobile data in the car is flaky — a 5G hotspot or USB modem can silently stop
+passing traffic. The app watches for this: if **two songs in a row** get no
+lyrics **and** a live reachability check confirms the internet is actually down,
+it recovers automatically:
+
+- **On a USB 5G modem** (e.g. the IK511 plugged in as a USB network adapter):
+  it **power-cycles just that modem's USB port** with `uhubctl`, falling back to
+  a driver re-enumeration if `uhubctl` isn't installed. Only the modem's own port
+  is touched — never the touchscreen or anything else on the bus.
+- **On Wi-Fi** (home Wi-Fi or a Wi-Fi hotspot): it **reboots the Pi**, which
+  re-kicks NetworkManager and the radio.
+
+Two genuinely-unfindable songs on a *working* connection never trigger it — the
+reachability check gates on the internet actually being down. Turn it off with
+`"auto_recover": false` in `config.json`.
+
+---
+
 ## Part G — Pair your phone & verify
 
 1. On the Pi screen, **long-press 10 s** → **Settings → Bluetooth → Pair New
@@ -350,6 +375,7 @@ can never blank the screen. Code changes still need a service restart.
 | `max_line_width_frac` | Shrink-to-fit any line wider than this fraction of the screen. |
 | `flip_180` | Rotate the whole frame 180° for an upside-down mount. |
 | `autoconnect` | Auto-reconnect AVRCP to the paired phone on boot / after a drop. |
+| `auto_recover` | Auto-recover lost internet after two lyric-less songs (see **Auto-recovery**). Default `true`. |
 
 Most font/colour values are also editable live from the on-screen menu (below),
 which writes them back to `config.json`.
