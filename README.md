@@ -4,6 +4,10 @@ A car karaoke lyric display for the Raspberry Pi. Your phone plays music over
 Bluetooth; the Pi reads the playback position and scrolls time-synced lyrics on a
 screen mounted in the car — no app on the phone, nothing to tap while driving.
 
+The current line **fills with colour in time with the song**, word-by-word where
+the source provides it (Kugou KRC / QQ QRC), so it reads like real karaoke. See
+**Word-level karaoke** in the [Pi Zero 2W guide](README_Pi_Zero_2W.md).
+
 ## Setup guides
 
 Pick the guide for your board:

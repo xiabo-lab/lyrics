@@ -82,8 +82,9 @@ that keeps your eyes on the road.
 | File | Purpose |
 |------|---------|
 | `Lyrics_Display.py` | The app: BlueZ/AVRCP watcher, sync clock, pygame renderer, on-screen settings + Bluetooth pairing menu. |
-| `lyric_sources.py` | Multi-source synced-lyric fetcher (QQ / Kugou / NetEase / LRCLIB): one concurrent sweep, best-match scored, with on-disk cache and the RED-button picker grid. |
-| `lrclib.py` | LRCLIB client + the `.lrc` parser (`parse_lrc`) and `LyricLine` type. |
+| `lyric_sources.py` | Multi-source synced-lyric fetcher (QQ / Kugou / NetEase / LRCLIB): one concurrent sweep, best-match scored, with on-disk cache and the RED-button picker grid. Prefers word-by-word lyrics (Kugou KRC / QQ QRC) where available. |
+| `lrclib.py` | LRCLIB client + the `.lrc` parser (`parse_lrc`, handles enhanced/word-level LRC) and `LyricLine`/`Word` types. |
+| `qqcrypto.py` | Pure-Python decryptor for QQ's word-by-word QRC lyrics (QQ's "buggy DES"). |
 | `config.json` | Live, hot-reloaded tuning (offsets, fonts, colours, brightness, …). |
 | `fnt/` | Extra fonts for the idle clock (`Aldrich-Regular.ttc`, `advanced_led_board-7.ttc`). Missing → the clock falls back to Noto. |
 | `*icon.png` / `*icon.jpg` | Per-source badges (QQ / Kugou / NetEase / LRCLIB) shown on picker results. |
@@ -367,7 +368,9 @@ can never blank the screen. Code changes still need a service restart.
 | `current_color` / `top_color` / `bottom_color` | Named palette colour per line (yellow, green, white, red, blue, purple). |
 | `current_bold` / `top_bold` / `bottom_bold` | Render each line (now / previous / next) bold. |
 | `show_prev_line` | Show the previous lyric above the current one. |
-| `progress_bar` | Thin progress bar under the current line. |
+| `karaoke_sync` | Karaoke fill: the current line's colour sweeps left→right in time (per-word when the source has word timing — see **Word-level karaoke** — else across the whole line). Replaces the progress bar when on. Default `true`. |
+| `karaoke_color` | The *sung* colour of the karaoke fill (palette name); the not-yet-sung part uses `current_color`. Default `white`. |
+| `progress_bar` | Thin progress bar under the current line. Ignored while `karaoke_sync` is on (the fill already shows progress). |
 | `intro_dots_max` | Pre-song countdown dots (1 dot ≈ 1 second). |
 | `line_gap_pad` | Extra spacing between stacked lines. |
 | `target_fps` | Render frame rate. |
@@ -379,6 +382,27 @@ can never blank the screen. Code changes still need a service restart.
 
 Most font/colour values are also editable live from the on-screen menu (below),
 which writes them back to `config.json`.
+
+---
+
+## Word-level karaoke
+
+The current lyric line **fills with colour left→right in time with the song** —
+the already-sung part in `karaoke_color` (default white), the rest in
+`current_color`. This replaces the old progress bar (`karaoke_sync`, default on).
+
+How precisely the fill tracks the words depends on what the source provides:
+
+- **Per-word / per-character timing** when the matched lyric comes from **Kugou
+  (KRC)** or **QQ Music (QRC)** — the fill edge lands on the exact word (or CJK
+  character) being sung. QRC needs `qqcrypto.py` (bundled).
+- **Line-level fill** otherwise (NetEase, LRCLIB, or any plain `.lrc`) — the edge
+  glides evenly across the line over its duration. Still a smooth karaoke sweep,
+  just not word-accurate.
+
+Both are automatic — no configuration beyond the two `karaoke_*` keys. Songs
+cached before this feature stay line-level until re-fetched (delete a cached
+lyric with a triple-tap, or clear `cache/`, to pull the word-level version).
 
 ---
 
