@@ -125,6 +125,11 @@ TOP_BOLD = False          # render the top (previous) context line bold
 BOTTOM_BOLD = False       # render the bottom (next) context line bold
 SHOW_PREV_LINE = True     # False = less-cluttered current+next-only view
 PROGRESS_BAR = True       # thin bar under the current line tracking progress
+# Karaoke fill: colour the current line left→right in time with the line, so the
+# text "fills" as it's sung (approximated from the line's own duration — plain
+# LRC has no per-word times). When on, it REPLACES the progress bar.
+KARAOKE_SYNC = True
+KARAOKE_COLOR = (235, 235, 235)   # sung-portion colour (White); unsung = CURRENT
 DIM_ENABLED = True        # auto-dim the whole display at night
 DAY_START_HOUR = 7        # local hour daytime (full) brightness begins
 NIGHT_START_HOUR = 19     # local hour night (dimmed) brightness begins
@@ -240,6 +245,8 @@ _CONFIG_DEFAULTS = {
     "autoconnect": AUTOCONNECT,
     "flip_180": FLIP_180,
     "auto_recover": AUTO_RECOVER,
+    "karaoke_sync": KARAOKE_SYNC,
+    "karaoke_color": color_name_of(KARAOKE_COLOR),
 }
 
 
@@ -305,7 +312,7 @@ def apply_config() -> None:
     global TOP_BOLD, BOTTOM_BOLD
     global PROGRESS_BAR, DIM_ENABLED, DAY_START_HOUR, NIGHT_START_HOUR
     global NIGHT_BRIGHTNESS, MAX_LINE_WIDTH_FRAC, AUTOCONNECT, FLIP_180
-    global AUTO_RECOVER
+    global AUTO_RECOVER, KARAOKE_SYNC, KARAOKE_COLOR
     cfg = load_config()
     LATENCY_OFFSET_MS = cfg["latency_offset_ms"]
     LEAD_OFFSET_MS = cfg["lead_offset_ms"]
@@ -332,6 +339,8 @@ def apply_config() -> None:
     AUTOCONNECT = cfg["autoconnect"]
     FLIP_180 = cfg["flip_180"]
     AUTO_RECOVER = cfg["auto_recover"]
+    KARAOKE_SYNC = cfg["karaoke_sync"]
+    KARAOKE_COLOR = COLOR_BY_NAME[cfg["karaoke_color"]]
 
 
 def write_config_values(updates: dict) -> None:
@@ -1680,6 +1689,36 @@ def draw_line(screen, text, size, bold, color, center_xy, max_len, rotate_deg,
     if rotate_deg:
         surf = pygame.transform.rotate(surf, rotate_deg)
     screen.blit(surf, surf.get_rect(center=center_xy))
+
+
+def draw_karaoke_line(screen, text, size, bold, base_color, sung_color, frac,
+                      center_xy, max_len, rotate_deg, font_path=FONT_PATH):
+    """Like draw_line, but with a KARAOKE fill: the left `frac` fraction of the
+    line is drawn in sung_color and the rest in base_color, split at a vertical
+    edge that sweeps left→right as frac goes 0→1. `frac` comes from how far the
+    playback clock is through the current line (plain LRC has no per-word times,
+    so timing is interpolated across the whole line). Same shrink-to-fit and
+    centering as draw_line; the composited line is rotated as a whole so the
+    fill direction stays correct on a rotated panel."""
+    if not text:
+        return
+    font = get_font(size, bold, font_path)
+    if max_len and font.size(text)[0] > max_len:
+        shrunk = max(8, int(size * max_len / font.size(text)[0]))
+        if shrunk < size:
+            font = get_font(shrunk, bold, font_path)
+    base = font.render(text, True, base_color)
+    combo = base.copy()
+    frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+    split = int(base.get_width() * frac)
+    if split > 0:
+        # Paint the sung colour over just the left `split` px — a glyph straddling
+        # the edge is filled part-way, which reads as a word being sung.
+        sung = font.render(text, True, sung_color)
+        combo.blit(sung, (0, 0), area=pygame.Rect(0, 0, split, base.get_height()))
+    if rotate_deg:
+        combo = pygame.transform.rotate(combo, rotate_deg)
+    screen.blit(combo, combo.get_rect(center=center_xy))
 
 
 def draw_clock(screen, segments, size, bold, center_xy, rotate_deg, font_path):
@@ -3586,14 +3625,32 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                             draw_line(screen, state.lines[idx - 1].text,
                                       FONT_TOP, TOP_BOLD, c_prev, prev_pos,
                                       max_len, ROTATION_DEG)
-                        draw_line(screen, state.lines[idx].text, FONT_CURRENT,
-                                  CURRENT_BOLD, c_current, curr_pos, max_len,
-                                  ROTATION_DEG)
-                        if idx + 1 < len(state.lines):
+                        has_next = idx + 1 < len(state.lines)
+                        # Current line: karaoke fill when we know its end (the
+                        # next line's timestamp gives the duration); otherwise a
+                        # plain solid line (e.g. the very last line).
+                        if KARAOKE_SYNC and has_next:
+                            span = (state.lines[idx + 1].time_ms
+                                    - state.lines[idx].time_ms)
+                            frac = ((t_ms - state.lines[idx].time_ms) / span
+                                    if span > 0 else 1.0)
+                            draw_karaoke_line(
+                                screen, state.lines[idx].text, FONT_CURRENT,
+                                CURRENT_BOLD, c_current,
+                                scale_color(KARAOKE_COLOR, bf), frac,
+                                curr_pos, max_len, ROTATION_DEG)
+                        else:
+                            draw_line(screen, state.lines[idx].text, FONT_CURRENT,
+                                      CURRENT_BOLD, c_current, curr_pos, max_len,
+                                      ROTATION_DEG)
+                        if has_next:
                             draw_line(screen, state.lines[idx + 1].text,
                                       FONT_BOTTOM, BOTTOM_BOLD, c_next, next_pos,
                                       max_len, ROTATION_DEG)
-                            if PROGRESS_BAR and ROTATION_DEG == 0:
+                            # Progress bar only when karaoke is off — the fill
+                            # already shows progress through the line.
+                            if (PROGRESS_BAR and not KARAOKE_SYNC
+                                    and ROTATION_DEG == 0):
                                 _draw_progress(screen, w, curr_pos,
                                                state.lines, idx, t_ms, bf)
                 else:
