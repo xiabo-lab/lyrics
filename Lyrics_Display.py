@@ -1691,15 +1691,39 @@ def draw_line(screen, text, size, bold, color, center_xy, max_len, rotate_deg,
     screen.blit(surf, surf.get_rect(center=center_xy))
 
 
-def draw_karaoke_line(screen, text, size, bold, base_color, sung_color, frac,
+def _karaoke_split_px(font, words, t_ms, line_end_ms, total_w):
+    """Pixel x at which the sung/unsung boundary sits, from per-word timing.
+    Walks the words measuring cumulative text width (accurate for proportional
+    fonts), interpolating within the word currently being sung. Before the first
+    word → 0; after the last → full width."""
+    prefix = ""
+    for i, w in enumerate(words):
+        w_end = words[i + 1].time_ms if i + 1 < len(words) else line_end_ms
+        x0 = font.size(prefix)[0]
+        prefix_after = prefix + w.text
+        if t_ms < w.time_ms:
+            return x0                                  # this word not reached yet
+        if w_end is not None and t_ms < w_end:
+            x1 = font.size(prefix_after)[0]
+            span = w_end - w.time_ms
+            wf = (t_ms - w.time_ms) / span if span > 0 else 1.0
+            return int(x0 + wf * (x1 - x0))            # mid-word
+        prefix = prefix_after                          # word fully sung
+    return total_w
+
+
+def draw_karaoke_line(screen, text, size, bold, base_color, sung_color,
+                      words, t_ms, line_start_ms, line_end_ms,
                       center_xy, max_len, rotate_deg, font_path=FONT_PATH):
-    """Like draw_line, but with a KARAOKE fill: the left `frac` fraction of the
-    line is drawn in sung_color and the rest in base_color, split at a vertical
-    edge that sweeps left→right as frac goes 0→1. `frac` comes from how far the
-    playback clock is through the current line (plain LRC has no per-word times,
-    so timing is interpolated across the whole line). Same shrink-to-fit and
-    centering as draw_line; the composited line is rotated as a whole so the
-    fill direction stays correct on a rotated panel."""
+    """Like draw_line, but with a KARAOKE fill: the sung part of the line is
+    drawn in sung_color, the rest in base_color, split at a vertical edge that
+    sweeps left→right as the song plays.
+
+    With per-word timing (`words` from enhanced-LRC/KRC/QRC) the edge tracks the
+    actual word being sung; with none it interpolates across the whole line from
+    line_start_ms→line_end_ms. Same shrink-to-fit + centering as draw_line; the
+    composited line is rotated as a whole so the fill stays correct when the
+    panel is rotated."""
     if not text:
         return
     font = get_font(size, bold, font_path)
@@ -1708,9 +1732,15 @@ def draw_karaoke_line(screen, text, size, bold, base_color, sung_color, frac,
         if shrunk < size:
             font = get_font(shrunk, bold, font_path)
     base = font.render(text, True, base_color)
+    total_w = base.get_width()
+    if words:
+        split = _karaoke_split_px(font, words, t_ms, line_end_ms, total_w)
+    else:
+        span = line_end_ms - line_start_ms
+        frac = (t_ms - line_start_ms) / span if span and span > 0 else 1.0
+        frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
+        split = int(total_w * frac)
     combo = base.copy()
-    frac = 0.0 if frac < 0 else (1.0 if frac > 1 else frac)
-    split = int(base.get_width() * frac)
     if split > 0:
         # Paint the sung colour over just the left `split` px — a glyph straddling
         # the edge is filled part-way, which reads as a word being sung.
@@ -3627,17 +3657,17 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                       max_len, ROTATION_DEG)
                         has_next = idx + 1 < len(state.lines)
                         # Current line: karaoke fill when we know its end (the
-                        # next line's timestamp gives the duration); otherwise a
-                        # plain solid line (e.g. the very last line).
+                        # next line's timestamp bounds the fill); otherwise a
+                        # plain solid line (e.g. the very last line). The fill
+                        # tracks per-word timing when the line carries it, else
+                        # interpolates across the whole line.
                         if KARAOKE_SYNC and has_next:
-                            span = (state.lines[idx + 1].time_ms
-                                    - state.lines[idx].time_ms)
-                            frac = ((t_ms - state.lines[idx].time_ms) / span
-                                    if span > 0 else 1.0)
+                            cur = state.lines[idx]
                             draw_karaoke_line(
-                                screen, state.lines[idx].text, FONT_CURRENT,
-                                CURRENT_BOLD, c_current,
-                                scale_color(KARAOKE_COLOR, bf), frac,
+                                screen, cur.text, FONT_CURRENT, CURRENT_BOLD,
+                                c_current, scale_color(KARAOKE_COLOR, bf),
+                                cur.words, t_ms, cur.time_ms,
+                                state.lines[idx + 1].time_ms,
                                 curr_pos, max_len, ROTATION_DEG)
                         else:
                             draw_line(screen, state.lines[idx].text, FONT_CURRENT,

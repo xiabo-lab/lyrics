@@ -31,6 +31,7 @@ import html
 import json
 import re
 import unicodedata
+import zlib
 from pathlib import Path
 
 import requests
@@ -268,9 +269,61 @@ KUGOU_HEADERS = {
 }
 
 
+# Kugou KRC (word-by-word) decryption + conversion to enhanced LRC.
+# KRC blobs are base64 → a 4-byte "krc1" magic → the rest XOR'd with this 16-byte
+# key (cycled) → zlib-deflated text. The text is line-level `[start,dur]` tags
+# followed by per-word `<offset,dur,0>text` (offset relative to the line start).
+_KRC_KEY = bytes([0x40, 0x47, 0x61, 0x77, 0x5e, 0x32, 0x74, 0x47,
+                  0x51, 0x36, 0x31, 0x2d, 0xce, 0xd2, 0x6e, 0x69])
+_KRC_LINE_RE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
+_KRC_WORD_RE = re.compile(r"<(\d+),(\d+),\d+>([^<]*)")
+
+
+def _lrc_ts(ms: int, open_ch: str, close_ch: str) -> str:
+    """Format `ms` as an LRC tag `[mm:ss.cc]` / word tag `<mm:ss.cc>`."""
+    return (f"{open_ch}{ms // 60_000:02d}:{(ms % 60_000) // 1000:02d}"
+            f".{(ms % 1000) // 10:02d}{close_ch}")
+
+
+def _krc_decrypt(b64: str) -> str | None:
+    """Decrypt a base64 KRC blob to its plain KRC text, or None on any failure."""
+    try:
+        data = base64.b64decode(b64)
+    except (ValueError, TypeError):
+        return None
+    if data[:4] != b"krc1":
+        return None
+    body = bytes(b ^ _KRC_KEY[i % 16] for i, b in enumerate(data[4:]))
+    try:
+        return zlib.decompress(body).decode("utf-8", "replace")
+    except (zlib.error, ValueError):
+        return None
+
+
+def _krc_to_enhanced_lrc(krc: str) -> str | None:
+    """Convert decrypted KRC text to enhanced LRC: `[mm:ss.cc]<mm:ss.cc>word…`
+    with ABSOLUTE per-word timestamps (line start + word offset). Metadata lines
+    like [ti:...]/[language:...] are skipped. Returns None if no timed lines."""
+    out: list[str] = []
+    for raw in krc.splitlines():
+        m = _KRC_LINE_RE.match(raw)
+        if not m:
+            continue                       # [ti:]/[ar:]/[language:] etc.
+        line_start = int(m.group(1))
+        words = _KRC_WORD_RE.findall(m.group(3))
+        if not words:
+            continue
+        parts = [_lrc_ts(line_start, "[", "]")]
+        for off, _dur, text in words:
+            parts.append(_lrc_ts(line_start + int(off), "<", ">") + text)
+        out.append("".join(parts))
+    return "\n".join(out) if out else None
+
+
 def _kugou_lyric(song_hash: str, timeout: float = 10) -> str | None:
-    """Resolve a lyric candidate for a Kugou hash and download it as LRC.
-    Returns None if there's no candidate or the result isn't synced."""
+    """Resolve a lyric candidate for a Kugou hash and download it, preferring the
+    word-by-word KRC (converted to enhanced LRC) and falling back to plain LRC.
+    Returns None if there's no candidate or nothing synced."""
     # Step 1: candidate (id + accesskey) for this song hash.
     r = requests.get(
         KUGOU_LYRIC_SEARCH,
@@ -286,16 +339,28 @@ def _kugou_lyric(song_hash: str, timeout: float = 10) -> str | None:
     accesskey = candidates[0].get("accesskey")
     if not cid or not accesskey:
         return None
-    # Step 2: download that candidate as base64-encoded LRC.
-    r = requests.get(
-        KUGOU_LYRIC_DOWNLOAD,
-        params={"ver": 1, "client": "pc", "id": cid, "accesskey": accesskey,
-                "fmt": "lrc", "charset": "utf8"},
-        headers=KUGOU_HEADERS,
-        timeout=timeout,
-    )
-    r.raise_for_status()
-    content = r.json().get("content") or ""
+
+    def _download(fmt: str) -> str:
+        resp = requests.get(
+            KUGOU_LYRIC_DOWNLOAD,
+            params={"ver": 1, "client": "pc", "id": cid, "accesskey": accesskey,
+                    "fmt": fmt, "charset": "utf8"},
+            headers=KUGOU_HEADERS, timeout=timeout)
+        resp.raise_for_status()
+        return resp.json().get("content") or ""
+
+    # Step 2a: try KRC (per-word). A song without KRC returns an empty/garbage
+    # blob that decrypt/convert rejects, so we fall through to plain LRC.
+    try:
+        krc = _krc_decrypt(_download("krc"))
+        enhanced = _krc_to_enhanced_lrc(krc) if krc else None
+        if enhanced:
+            return enhanced
+    except requests.RequestException:
+        pass  # fall back to LRC below
+
+    # Step 2b: plain LRC fallback.
+    content = _download("lrc")
     if not content:
         return None
     try:

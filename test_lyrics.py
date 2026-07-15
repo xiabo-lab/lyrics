@@ -5,8 +5,9 @@ Run on the Pi (no network or display needed):
 """
 import unittest
 
-from lrclib import LyricLine, parse_lrc
-from lyric_sources import GRID_MAX, best_candidate, build_grid, score_candidate
+from lrclib import LyricLine, Word, parse_lrc, shift_lrc_timestamps
+from lyric_sources import (GRID_MAX, best_candidate, build_grid,
+                           score_candidate, _krc_to_enhanced_lrc)
 from Lyrics_Display import decide_lock, find_current_index
 
 
@@ -151,13 +152,16 @@ class BuildGridTests(unittest.TestCase):
         return {name: [_cand(name, f"{name}{i}", "a") for i in range(n)]
                 for name, n in counts.items()}
 
-    def test_two_per_source_in_source_order(self):
+    def test_core_respects_caps_in_source_order(self):
+        # Core row takes each source's cap in source order (QQ is capped at 1 —
+        # its search over-returns unrelated songs — so caps sum to 1+2+2+2 = 7);
+        # the 8th cell is then backfilled round-robin, starting from QQ's extras.
         by_name = self._by_name({"QQ": 4, "Kugou": 4, "NetEase": 4, "LRCLIB": 4})
         grid = build_grid(by_name)
         self.assertEqual(len(grid), GRID_MAX)
         self.assertEqual([c["source"] for c in grid],
-                         ["QQ", "QQ", "Kugou", "Kugou",
-                          "NetEase", "NetEase", "LRCLIB", "LRCLIB"])
+                         ["QQ", "Kugou", "Kugou", "NetEase", "NetEase",
+                          "LRCLIB", "LRCLIB", "QQ"])
 
     def test_backfills_from_sources_with_extras(self):
         # Only QQ and LRCLIB answered — they must cover all 8 cells.
@@ -187,6 +191,43 @@ class BuildGridTests(unittest.TestCase):
         grid = build_grid(by_name, pin=pin)
         self.assertEqual(len(grid), GRID_MAX)
         self.assertIs(grid[0], pin)
+
+
+class WordLevelLyricTests(unittest.TestCase):
+    def test_enhanced_lrc_words_parsed(self):
+        line = parse_lrc("[00:06.59]<00:06.59>Hello <00:09.25>it's <00:09.40>me")[0]
+        self.assertEqual(line.time_ms, 6590)
+        self.assertEqual(line.text, "Hello it's me")   # word tags stripped
+        self.assertEqual([(w.text, w.time_ms) for w in line.words],
+                         [("Hello ", 6590), ("it's ", 9250), ("me", 9400)])
+
+    def test_plain_lrc_has_no_words(self):
+        self.assertEqual(parse_lrc("[00:01.00]plain line")[0].words, [])
+
+    def test_words_not_attached_to_multi_timestamp_line(self):
+        # Absolute word times can't be reused for a repeated timestamp.
+        for line in parse_lrc("[00:01.00][00:03.00]<00:01.00>x<00:01.50>y"):
+            self.assertEqual(line.words, [])
+
+    def test_shift_moves_word_tags_too(self):
+        out = shift_lrc_timestamps("[00:06.59]<00:06.59>Hi <00:09.25>yo", 500)
+        self.assertEqual(out, "[00:07.09]<00:07.09>Hi <00:09.75>yo")
+
+    def test_krc_to_enhanced_lrc(self):
+        # KRC offsets are ms; enhanced LRC is centiseconds, so times truncate to
+        # the nearest 10ms (invisible at 30 fps). 6591→6590, 6591+2660=9251→9250.
+        krc = ("[ti:test]\n[6591,3110]<0,2660,0>Hello <2660,150,0>it's\n"
+               "[0,2250]<0,160,0>晴<160,160,0>天")
+        enhanced = _krc_to_enhanced_lrc(krc)
+        lines = parse_lrc(enhanced)
+        self.assertEqual(len(lines), 2)
+        first = next(l for l in lines if l.time_ms == 6590)
+        # absolute word start = line start + KRC offset (centisecond-truncated)
+        self.assertEqual([(w.text, w.time_ms) for w in first.words],
+                         [("Hello ", 6590), ("it's", 9250)])
+
+    def test_krc_no_timed_lines_returns_none(self):
+        self.assertIsNone(_krc_to_enhanced_lrc("[ti:x]\n[ar:y]\nplain"))
 
 
 if __name__ == "__main__":
