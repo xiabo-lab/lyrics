@@ -279,6 +279,18 @@ skip it unless something isn't working or you want to migrate settings.
 
 ---
 
+## Word-level karaoke
+
+The current lyric line **fills with colour in time with the song** — the sung
+part in `karaoke_color` (default white), the rest in `current_color`. Where the
+matched lyric comes from **Kugou (KRC)** or **QQ Music (QRC)** the fill tracks
+the exact word (or CJK character) being sung; otherwise it glides evenly across
+the line. On by default (`karaoke_sync`) and it replaces the progress bar. QRC
+decoding uses the bundled `qqcrypto.py`. Full details + the `karaoke_*` config
+keys are in the [Pi Zero 2W guide](README_Pi_Zero_2W.md#word-level-karaoke).
+
+---
+
 # Optional & troubleshooting (skip unless you need it)
 
 ## After you press `Esc` (expected behaviour, not a fault)
