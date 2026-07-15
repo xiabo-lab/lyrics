@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -84,6 +84,10 @@ UPDATE_FILES = (
     "wifi.sh", "carlyric-claude.sudoers", "README.md", "LICENSE", ".gitignore",
     # Pinyin IME data table + its generator (Modify Search → 中 mode).
     "pinyin_table.json", "build_pinyin_table.py",
+    # Assets: idle-clock fonts + picker source-badge icons. Kept top-level (no
+    # subdir) so the OTA apply loop copies them even on older installs.
+    "Aldrich-Regular.ttc", "advanced_led_board-7.ttc",
+    "qq music icon.jpg", "kugou icon.jpg", "netease icon.png", "lrclib icon.png",
 )
 UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
@@ -111,9 +115,10 @@ ROTATION_DEG = 0   # 0 for test monitor; 90 once the bar LCD is mounted.
 FLIP_180 = True    # monitor mounted upside-down: turn the whole frame 180°.
 FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 # Square geometric face (Google "Aldrich") used ONLY for the idle clock's big
-# time readout. Bundled in the repo's fnt/ dir (from the xiabo-lab/pi_dashboard
-# repo). get_font falls back to FONT_PATH if it's missing.
-CLOCK_FONT_PATH = str(INSTALL_DIR / "fnt" / "Aldrich-Regular.ttc")
+# time readout. Bundled at the repo root (from the xiabo-lab/pi_dashboard repo)
+# — kept top-level so OTA can ship it. get_font falls back to FONT_PATH if it's
+# missing. Alt LED face `advanced_led_board-7.ttc` also ships alongside.
+CLOCK_FONT_PATH = str(INSTALL_DIR / "Aldrich-Regular.ttc")
 FONT_CURRENT = 56   # current/now line (and intro line)
 FONT_TOP = 34       # top context line (previous lyric)
 FONT_BOTTOM = 34    # bottom context line (next lyric)
@@ -1186,6 +1191,7 @@ class FirmwareUpdater:
                 if not src.exists():
                     continue
                 dst = INSTALL_DIR / name
+                dst.parent.mkdir(parents=True, exist_ok=True)  # support subdir entries
                 tmp_dst = dst.with_name(dst.name + ".new")
                 shutil.copy2(src, tmp_dst)
                 os.replace(tmp_dst, dst)
