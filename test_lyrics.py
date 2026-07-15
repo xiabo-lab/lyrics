@@ -244,6 +244,19 @@ class WordLevelLyricTests(unittest.TestCase):
         self.assertEqual([(w.text, w.time_ms) for w in line.words],
                          [("(", 0), ("Jay", 160)])
 
+    def test_word_concat_equals_text(self):
+        # The karaoke fill measures word widths against the rendered `text`, so
+        # "".join(words) MUST equal text — even when the source has leading or
+        # trailing whitespace words (real QRC lines often end with a space).
+        for enh in (
+            "[00:00.00]<00:00.00> hi <00:00.10>yo ",   # lead + trail
+            "[00:00.00]<00:00.00>Re <00:00.25>La ",    # trailing (QRC-style)
+            "[00:00.00]<00:00.00> <00:00.10>hi<00:00.20> ",  # pure-space edges
+            "[00:00.00]<00:00.00>晴<00:00.16>天",       # normal CJK
+        ):
+            line = parse_lrc(enh)[0]
+            self.assertEqual("".join(w.text for w in line.words), line.text)
+
 
 class QQCryptoTests(unittest.TestCase):
     def test_qrc_decrypt_known_vector(self):

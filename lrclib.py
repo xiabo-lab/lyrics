@@ -113,7 +113,17 @@ def parse_lrc(lrc: str) -> list[LyricLine]:
             continue  # metadata or blank
         body = _LINE_TS.sub("", raw)                 # keeps <..> word tags
         words = _parse_words(body) if len(line_tags) == 1 else []
-        text = _WORD_TS.sub("", body).strip()
+        if words:
+            # Keep `text` and the word concatenation IDENTICAL: the karaoke fill
+            # measures word widths against the rendered `text`, so any drift
+            # (e.g. a trailing-space word that strip() would drop) misplaces the
+            # sung/unsung edge. Trim outer whitespace off the edge words instead.
+            words[0].text = words[0].text.lstrip()
+            words[-1].text = words[-1].text.rstrip()
+            words = [w for w in words if w.text]
+            text = "".join(w.text for w in words)
+        else:
+            text = _WORD_TS.sub("", body).strip()
         for m in line_tags:
             lines.append(LyricLine(_ts_to_ms(*m.groups()), text, words))
     lines.sort(key=lambda l: l.time_ms)
