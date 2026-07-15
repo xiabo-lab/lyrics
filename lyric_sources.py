@@ -36,6 +36,7 @@ from pathlib import Path
 
 import requests
 
+import qqcrypto
 from lrclib import search_synced_lyrics as _search_lrclib
 
 # --- Local cache -----------------------------------------------------------
@@ -230,14 +231,73 @@ def _netease_lyric(song_id: int, timeout: float = 10) -> str | None:
 # search API and returns songmids the lyric endpoint below still resolves.
 QQ_SEARCH = "https://u.y.qq.com/cgi-bin/musicu.fcg"
 QQ_LYRIC = "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg"
+# Word-by-word QRC download (needs the numeric musicid, not the songmid). The
+# blob is hex-encoded, buggy-DES encrypted — see qqcrypto — then zlib text.
+QQ_QRC_DOWNLOAD = "https://c.y.qq.com/qqmusic/fcgi-bin/lyric_download.fcg"
 QQ_HEADERS = {
     "Referer": "https://y.qq.com/",
     "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) carlyric/1.0",
 }
+_QRC_CONTENT_RE = re.compile(r"<content[^>]*>(.*?)</content>", re.S)
+# QRC line `[start,dur]` then per-word `word(absStart,dur)` — note the timing tag
+# comes AFTER the word and its start is ABSOLUTE (unlike KRC's relative offset).
+_QRC_LINE_RE = re.compile(r"^\[(\d+),(\d+)\](.*)$")
+_QRC_WORD_RE = re.compile(r"(.*?)\((\d+),(\d+)\)")
 
 
-def _qq_lyric(songmid: str, timeout: float = 10) -> str | None:
-    """Pull the LRC blob for a QQ songmid. Returns None if unsynced."""
+def _qrc_to_enhanced_lrc(qrc: str) -> str | None:
+    """Convert decrypted QRC text to enhanced LRC: `[mm:ss.cc]<mm:ss.cc>word…`.
+    QRC word starts are already absolute. Returns None if no timed lines."""
+    out: list[str] = []
+    for raw in qrc.splitlines():
+        m = _QRC_LINE_RE.match(raw)
+        if not m:
+            continue                       # [ti:]/XML wrapper/etc.
+        words = _QRC_WORD_RE.findall(m.group(3))
+        if not words:
+            continue
+        parts = [_lrc_ts(int(m.group(1)), "[", "]")]
+        for text, start, _dur in words:
+            parts.append(_lrc_ts(int(start), "<", ">") + text)
+        out.append("".join(parts))
+    return "\n".join(out) if out else None
+
+
+def _qq_qrc(musicid, timeout: float = 10) -> str | None:
+    """Fetch + decrypt QQ's word-by-word QRC for a numeric musicid, as enhanced
+    LRC. None if unavailable / not decryptable."""
+    if not musicid:
+        return None
+    r = requests.get(
+        QQ_QRC_DOWNLOAD,
+        params={"version": 15, "miniversion": 82, "lrctype": 4,
+                "musicid": musicid},
+        headers={"Referer": "https://y.qq.com/portal/player.html",
+                 "User-Agent": QQ_HEADERS["User-Agent"]},
+        timeout=timeout)
+    r.raise_for_status()
+    m = _QRC_CONTENT_RE.search(r.text)
+    if not m:
+        return None
+    hexstr = m.group(1).replace("<![CDATA[", "").replace("]]>", "").strip()
+    qrc = qqcrypto.qrc_decrypt(hexstr)
+    return _qrc_to_enhanced_lrc(qrc) if qrc else None
+
+
+def _qq_lyric(key, timeout: float = 10) -> str | None:
+    """Pull a QQ lyric, preferring word-by-word QRC (converted to enhanced LRC)
+    and falling back to the plain LRC endpoint. `key` is (musicid, songmid) — the
+    numeric id drives QRC, the songmid drives the plain-LRC fallback."""
+    musicid, songmid = key if isinstance(key, tuple) else (None, key)
+    # QRC first (per-word). Any hiccup falls through to plain LRC.
+    try:
+        enhanced = _qq_qrc(musicid, timeout)
+        if enhanced:
+            return enhanced
+    except requests.RequestException:
+        pass
+    if not songmid:
+        return None
     r = requests.get(
         QQ_LYRIC,
         params={"songmid": songmid, "format": "json", "nobase64": 1},
@@ -545,11 +605,12 @@ def _candidates(source: str, search_fn, lyric_fn,
 
 def _qq_search_list(track: str, artist: str, limit: int,
                     timeout: float = 10) -> list[tuple[str, str, str]]:
-    """Up to `limit` (songmid, title, artist) QQ matches for (track, artist).
+    """Up to `limit` ((musicid, songmid), title, artist) QQ matches.
 
     Uses the musicu.fcg SearchCgiService: the request is a JSON `data` blob and
-    the matches come back at req_1.data.body.song.list, each carrying `mid`
-    (the songmid the lyric endpoint needs), `name`/`title`, and `singer`."""
+    the matches come back at req_1.data.body.song.list, each carrying `id`
+    (numeric musicid, for QRC), `mid` (songmid, for plain LRC), `name`/`title`,
+    and `singer`."""
     query = f"{track} {artist}".strip()
     if not query:
         return []
@@ -575,7 +636,9 @@ def _qq_search_list(track: str, artist: str, limit: int,
             continue
         names = "/".join(x.get("name", "") for x in (s.get("singer") or [])
                          if x.get("name"))
-        out.append((mid, s.get("name") or s.get("title") or track,
+        # Key is (musicid, songmid): the numeric id drives the word-by-word QRC
+        # download, the songmid the plain-LRC fallback. See _qq_lyric.
+        out.append(((s.get("id"), mid), s.get("name") or s.get("title") or track,
                     names or artist))
     return out
 

@@ -7,7 +7,8 @@ import unittest
 
 from lrclib import LyricLine, Word, parse_lrc, shift_lrc_timestamps
 from lyric_sources import (GRID_MAX, best_candidate, build_grid,
-                           score_candidate, _krc_to_enhanced_lrc)
+                           score_candidate, _krc_to_enhanced_lrc,
+                           _qrc_to_enhanced_lrc)
 from Lyrics_Display import decide_lock, find_current_index
 
 
@@ -228,6 +229,43 @@ class WordLevelLyricTests(unittest.TestCase):
 
     def test_krc_no_timed_lines_returns_none(self):
         self.assertIsNone(_krc_to_enhanced_lrc("[ti:x]\n[ar:y]\nplain"))
+
+    def test_qrc_to_enhanced_lrc(self):
+        # QRC word times are ABSOLUTE and the tag follows the word.
+        qrc = "[ti:x]\n[6591,3110]Hello (6591,2660)it's (9251,150)me(9401,300)"
+        line = parse_lrc(_qrc_to_enhanced_lrc(qrc))[0]
+        self.assertEqual(line.text, "Hello it's me")
+        self.assertEqual([(w.text, w.time_ms) for w in line.words],
+                         [("Hello ", 6590), ("it's ", 9250), ("me", 9400)])
+
+    def test_qrc_literal_paren_in_lyric(self):
+        # A literal '(' in the lyric must not be mistaken for a timing tag.
+        line = parse_lrc(_qrc_to_enhanced_lrc("[0,1000]((0,160)Jay(160,300)"))[0]
+        self.assertEqual([(w.text, w.time_ms) for w in line.words],
+                         [("(", 0), ("Jay", 160)])
+
+
+class QQCryptoTests(unittest.TestCase):
+    def test_qrc_decrypt_known_vector(self):
+        # Encrypt a known plaintext with the QRC key (buggy-DES, ENCRYPT), then
+        # confirm qrc_decrypt round-trips it — validates the cipher end to end
+        # without needing the network.
+        import zlib
+        from qqcrypto import (QRC_KEY, _triple_setup, _triple_crypt, _ENCRYPT,
+                              qrc_decrypt)
+        plain = b"[0,500]hi(0,250)yo(250,250)"
+        comp = bytearray(zlib.compress(plain))
+        comp += bytes((-len(comp)) % 8)                 # pad to 8-byte blocks
+        enc_sched = _triple_setup(QRC_KEY, _ENCRYPT)
+        blob = bytearray()
+        for i in range(0, len(comp), 8):
+            blob += _triple_crypt(comp[i:i + 8], enc_sched)
+        self.assertEqual(qrc_decrypt(bytes(blob)), plain.decode())
+
+    def test_qrc_decrypt_rejects_garbage(self):
+        from qqcrypto import qrc_decrypt
+        self.assertIsNone(qrc_decrypt("zznothex"))
+        self.assertIsNone(qrc_decrypt(b"\x00" * 8))     # decrypts, not zlib
 
 
 if __name__ == "__main__":

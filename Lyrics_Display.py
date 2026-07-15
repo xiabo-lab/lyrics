@@ -79,6 +79,7 @@ INSTALL_DIR = Path(__file__).resolve().parent
 UPDATE_URL = "https://github.com/xiabo-lab/lyrics/archive/refs/heads/main.tar.gz"
 UPDATE_FILES = (
     "Lyrics_Display.py", "lyric_sources.py", "lrclib.py", "test_lyrics.py",
+    "qqcrypto.py",   # QQ QRC (word-by-word) buggy-DES decryptor
     "bt-agent.service", "99-carlyric-ignore-avrcp-pointer.rules",
     "wifi.sh", "carlyric-claude.sudoers", "README.md", "LICENSE", ".gitignore",
     # Pinyin IME data table + its generator (Modify Search → 中 mode).
