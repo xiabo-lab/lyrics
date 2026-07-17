@@ -127,8 +127,13 @@ BG_SOLID_COLORS = (
     ("Black", (0, 0, 0)),
     ("White", (235, 235, 235)),
     ("Grey", (110, 110, 110)),
+    ("Light Brown", (196, 164, 132)),
+    ("Sky Blue", (135, 206, 235)),
 )
 BG_COLOR_BY_NAME = {name.lower(): rgb for name, rgb in BG_SOLID_COLORS}
+# Display labels, keyed by the lowercase config value: "light brown" must read
+# back as "Light Brown", which str.capitalize() would mangle to "Light brown".
+BG_COLOR_LABELS = {name.lower(): name for name, _rgb in BG_SOLID_COLORS}
 # Pictures live here, so a user can drop their own in beside the shipped three.
 IMAGE_DIR = INSTALL_DIR / "image"
 BG_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
@@ -241,6 +246,7 @@ SETTING_COLORS = [
     # For light backdrops (a white solid, or a bright picture) — the others are
     # all bright, which only reads against a dark background.
     ("Black",  (0, 0, 0)),
+    ("Brown",  (165, 105, 60)),
 ]
 COLOR_BY_NAME = {name.lower(): rgb for name, rgb in SETTING_COLORS}
 
@@ -424,6 +430,16 @@ def apply_config() -> None:
                * BACKGROUND_SLIDESHOW_STEP_S)
     BACKGROUND_SLIDESHOW_S = max(BACKGROUND_SLIDESHOW_MIN_S,
                                  min(BACKGROUND_SLIDESHOW_MAX_S, snapped))
+
+
+def readable_text_on(rgb) -> tuple:
+    """Black or white text, whichever reads against `rgb`.
+
+    Picked from perceived luminance rather than named cases, so adding a swatch
+    can't quietly leave a label unreadable (white on Light Brown, say)."""
+    r, g, b = rgb[:3]
+    return (0, 0, 0) if (0.299 * r + 0.587 * g + 0.114 * b) > 140 \
+        else (235, 235, 235)
 
 
 def fmt_slideshow_interval(seconds: int) -> str:
@@ -3070,8 +3086,8 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
     # --- choice row: three flat colours, or one page of picture tiles
     nav = None
     if mode == "solid":
-        choices = _btn_row(rows["choice"],
-                           [n.lower() for n, _rgb in BG_SOLID_COLORS], 3)
+        names = [n.lower() for n, _rgb in BG_SOLID_COLORS]
+        choices = _btn_row(rows["choice"], names, len(names))
     else:
         images = list_background_images()
         n_images = len(images)
@@ -3156,9 +3172,8 @@ def draw_background(screen, w, h, page: int) -> None:
             if bg_color_name_of(BACKGROUND_COLOR) == value:
                 pygame.draw.rect(screen, (255, 255, 255), r.inflate(8, 8), 3,
                                  border_radius=13)
-            txt = value.capitalize()
-            s = btn_font.render(txt, True, (0, 0, 0) if value == "white"
-                                else (235, 235, 235))
+            s = btn_font.render(BG_COLOR_LABELS[value], True,
+                                readable_text_on(BG_COLOR_BY_NAME[value]))
             screen.blit(s, s.get_rect(center=r.center))
     else:
         _label(rows["choice"], "Picture")
