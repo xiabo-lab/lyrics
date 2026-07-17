@@ -224,7 +224,7 @@ Wants=bluetooth.service
 [Service]
 User=root
 Environment=XDG_RUNTIME_DIR=/tmp
-ExecStart=/usr/bin/cage -s -- /usr/bin/python3 /home/fuwenxu/carlyrics/Lyrics_Display.py
+ExecStart=/usr/bin/cage -s -- /usr/bin/python3 -u /home/fuwenxu/carlyrics/Lyrics_Display.py
 Restart=always
 RestartSec=3
 
@@ -243,11 +243,26 @@ Then enable and start:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now carlyric.service
-journalctl -u carlyric.service -f      # watch it start
+journalctl -t cage -f      # watch it start (see note below)
 ```
 
 A healthy start logs `[config] …`, `[display] <W> x <H>`, and on a track change
 `[track] <artist> — <title>` followed by a lyric source hit.
+
+> **Why `python3 -u`?** systemd hands the app a journal socket, not a terminal,
+> and Python block-buffers `print()` to anything that isn't a terminal. Without
+> `-u`, the `[config]`/`[display]` lines above sit in a memory buffer for hours
+> instead of reaching the journal — and are lost outright if the process
+> crashes, which is exactly when you want them. `-u` turns buffering off so
+> `[config]`, `[track]`, `[sync]` and `[lyrics]` appear live.
+>
+> The app runs as a child of `cage`, so its output carries the **`cage`** syslog
+> identifier rather than `python3`. Filtering by identifier keeps the app's own
+> lines and drops cage's EGL/xwayland noise:
+>
+> ```bash
+> journalctl -t cage -f | grep -E '\[(config|display|track|sync|seek|lyrics|status)\]'
+> ```
 
 ---
 

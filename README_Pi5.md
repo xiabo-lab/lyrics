@@ -189,7 +189,7 @@ StandardInput=tty
 StandardOutput=journal
 StandardError=journal
 Environment=XDG_RUNTIME_DIR=/tmp
-ExecStart=/usr/bin/cage -s -- /usr/bin/python3 /home/fuwenxu/carlyrics/Lyrics_Display.py
+ExecStart=/usr/bin/cage -s -- /usr/bin/python3 -u /home/fuwenxu/carlyrics/Lyrics_Display.py
 Restart=on-failure
 RestartSec=3
 
@@ -219,12 +219,30 @@ Save (`Ctrl+O`, `Enter`, `Ctrl+X`), then enable and start:
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now carlyric.service
-journalctl -u carlyric.service -f      # watch it start
+journalctl -t cage -f      # watch it start (see note below)
 ```
 
 A healthy start logs `[config] …` and `[display] <W> x <H>`, and the lyrics
 screen appears on the HDMI display. Press `Ctrl+C` to stop watching the log (the
 service keeps running).
+
+> **Why `python3 -u`?** systemd hands the app a journal socket, not a terminal,
+> and Python block-buffers `print()` to anything that isn't a terminal. Without
+> `-u`, the `[config]`/`[display]` lines above sit in a memory buffer for hours
+> instead of reaching the journal — and are lost outright if the process
+> crashes, which is exactly when you want them. `-u` turns buffering off so
+> `[config]`, `[track]`, `[sync]` and `[lyrics]` appear live.
+>
+> **Why `-t cage` and not `-u carlyric.service`?** The app runs as a child of
+> `cage`, so its output carries the **`cage`** syslog identifier — and because
+> this unit uses `PAMName=login`, that child is placed in a `session-N.scope`
+> rather than in `carlyric.service`. So `journalctl -u carlyric.service` shows
+> only cage's own EGL/xwayland errors, *not* the app's lines. Filtering by
+> identifier always works:
+>
+> ```bash
+> journalctl -t cage -f | grep -E '\[(config|display|track|sync|seek|lyrics|status)\]'
+> ```
 
 ---
 
