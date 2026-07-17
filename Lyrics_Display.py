@@ -91,7 +91,9 @@ UPDATE_FILES = (
     # Stock backdrops for Settings → Background Picture. Subdir entries are fine
     # (the apply loop mkdirs parents). A user's own pictures dropped into image/
     # are left alone — OTA only overwrites these names.
-    "image/Morning.png", "image/Afternoon.png", "image/Dark.png",
+    "image/Sample 1.jpg", "image/Sample 2.jpg", "image/Sample 3.jpg",
+    "image/Sample 4.png", "image/Sample 5.png", "image/Sample 6.jpg",
+    "image/Sample 7.jpg", "image/Sample 8.jpg",
 )
 UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
@@ -111,9 +113,12 @@ BACKGROUND_MODE = "solid"          # "solid" | "picture"
 BACKGROUND_COLOR = (0, 0, 0)       # one of BG_SOLID_COLORS (solid mode)
 BACKGROUND_IMAGE = ""              # filename inside image/; "" = first found
 BACKGROUND_SLIDESHOW = False       # picture mode: cycle through image/
-BACKGROUND_SLIDESHOW_S = 60        # seconds per picture when the slideshow runs
-BACKGROUND_SLIDESHOW_MIN_S = 5
-BACKGROUND_SLIDESHOW_MAX_S = 600
+# Seconds per picture. Stepped in whole half-hours: a backdrop is scenery, not
+# something to watch change, so the useful range is "occasionally" not "often".
+BACKGROUND_SLIDESHOW_S = 1800      # 30 min
+BACKGROUND_SLIDESHOW_STEP_S = 1800  # one tap = 30 min
+BACKGROUND_SLIDESHOW_MIN_S = 1800   # 30 min
+BACKGROUND_SLIDESHOW_MAX_S = 14400  # 4 h — 8 taps end to end
 # The three flat backdrops. Deliberately NOT SETTING_COLORS: those are text
 # colours (all bright, to read against black), which is the opposite of what a
 # backdrop needs.
@@ -408,9 +413,21 @@ def apply_config() -> None:
     BACKGROUND_COLOR = BG_COLOR_BY_NAME[cfg["background_color"]]
     BACKGROUND_IMAGE = cfg["background_image"]
     BACKGROUND_SLIDESHOW = cfg["background_slideshow"]
+    # Snap onto the half-hour grid before clamping: a config written by an older
+    # build (or by hand) can hold arbitrary seconds, and ± would then walk off
+    # the grid forever — 530s becoming 2330s, 4130s, …
+    snapped = (round(cfg["background_slideshow_s"] / BACKGROUND_SLIDESHOW_STEP_S)
+               * BACKGROUND_SLIDESHOW_STEP_S)
     BACKGROUND_SLIDESHOW_S = max(BACKGROUND_SLIDESHOW_MIN_S,
-                                 min(BACKGROUND_SLIDESHOW_MAX_S,
-                                     cfg["background_slideshow_s"]))
+                                 min(BACKGROUND_SLIDESHOW_MAX_S, snapped))
+
+
+def fmt_slideshow_interval(seconds: int) -> str:
+    """Seconds → a glanceable half-hour label: '30 min', '1 h', '1 h 30 min'."""
+    hours, mins = divmod(max(0, seconds) // 60, 60)
+    if not hours:
+        return f"{mins} min"
+    return f"{hours} h" if not mins else f"{hours} h {mins} min"
 
 
 def bg_color_name_of(rgb) -> str:
@@ -3183,8 +3200,8 @@ def draw_background(screen, w, h, page: int) -> None:
             s = btn_font.render(sym, True, (255, 255, 255) if on
                                 else (120, 120, 130))
             screen.blit(s, s.get_rect(center=slide[bk].center))
-        vs = btn_font.render(f"{BACKGROUND_SLIDESHOW_S}s", True,
-                             (255, 220, 120) if on else (120, 120, 130))
+        vs = btn_font.render(fmt_slideshow_interval(BACKGROUND_SLIDESHOW_S),
+                             True, (255, 220, 120) if on else (120, 120, 130))
         screen.blit(vs, vs.get_rect(center=slide["value"].center))
 
     # Size notice — uses the panel's REAL size, so it tells the truth on any
@@ -3812,12 +3829,13 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 background_save()
                 return
             new = BACKGROUND_SLIDESHOW_S
+            step = BACKGROUND_SLIDESHOW_STEP_S
             if slide["minus"].collidepoint(lx, ly):
                 new = max(BACKGROUND_SLIDESHOW_MIN_S,
-                          BACKGROUND_SLIDESHOW_S - 15)
+                          BACKGROUND_SLIDESHOW_S - step)
             elif slide["plus"].collidepoint(lx, ly):
                 new = min(BACKGROUND_SLIDESHOW_MAX_S,
-                          BACKGROUND_SLIDESHOW_S + 15)
+                          BACKGROUND_SLIDESHOW_S + step)
             if new != BACKGROUND_SLIDESHOW_S:
                 BACKGROUND_SLIDESHOW_S = new
                 background_save()
