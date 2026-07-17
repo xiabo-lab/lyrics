@@ -120,6 +120,12 @@ BACKGROUND_SLIDESHOW_S = 1800      # 30 min
 BACKGROUND_SLIDESHOW_STEP_S = 1800  # one tap = 30 min
 BACKGROUND_SLIDESHOW_MIN_S = 1800   # 30 min
 BACKGROUND_SLIDESHOW_MAX_S = 14400  # 4 h — 8 taps end to end
+# Extra darkening of the PICTURE only, in percent, on top of the night auto-dim.
+# Buys contrast for the lyrics on a busy or bright picture without touching the
+# text colours. Pictures only — a solid backdrop has nothing to fight.
+BACKGROUND_DIM = 0
+BACKGROUND_DIM_MAX = 60      # beyond this the picture is mud, not scenery
+BACKGROUND_DIM_STEP = 10
 # The three flat backdrops. Deliberately NOT SETTING_COLORS: those are text
 # colours (all bright, to read against black), which is the opposite of what a
 # backdrop needs.
@@ -300,6 +306,7 @@ _CONFIG_DEFAULTS = {
     "background_image": BACKGROUND_IMAGE,
     "background_slideshow": BACKGROUND_SLIDESHOW,
     "background_slideshow_s": BACKGROUND_SLIDESHOW_S,
+    "background_dim": BACKGROUND_DIM,
 }
 
 # String config keys that are NOT colours. Without these, load_config would
@@ -390,7 +397,7 @@ def apply_config() -> None:
     global NIGHT_BRIGHTNESS, MAX_LINE_WIDTH_FRAC, AUTOCONNECT, FLIP_180
     global AUTO_RECOVER, KARAOKE_SYNC, KARAOKE_COLOR
     global BACKGROUND_MODE, BACKGROUND_COLOR, BACKGROUND_IMAGE
-    global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S
+    global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S, BACKGROUND_DIM
     cfg = load_config()
     LATENCY_OFFSET_MS = cfg["latency_offset_ms"]
     LEAD_OFFSET_MS = cfg["lead_offset_ms"]
@@ -430,6 +437,7 @@ def apply_config() -> None:
                * BACKGROUND_SLIDESHOW_STEP_S)
     BACKGROUND_SLIDESHOW_S = max(BACKGROUND_SLIDESHOW_MIN_S,
                                  min(BACKGROUND_SLIDESHOW_MAX_S, snapped))
+    BACKGROUND_DIM = max(0, min(BACKGROUND_DIM_MAX, cfg["background_dim"]))
 
 
 def readable_text_on(rgb) -> tuple:
@@ -535,8 +543,22 @@ def background_surface(name: str, w: int, h: int):
     return surf
 
 
-def paint_lyric_background(screen, w: int, h: int, name: str) -> None:
+# One reusable black sheet per screen size, alpha-blended over the picture to
+# darken it. Cheaper and simpler than rescaling the pixels every frame, and the
+# alpha can change per frame for free.
+_bg_shade_cache: dict = {}
+
+
+def paint_lyric_background(screen, w: int, h: int, name: str,
+                           bright: float = 1.0) -> None:
     """Paint the lyric screen's backdrop: a picture, else the solid colour.
+
+    `bright` is the same 0..1 factor the lyric text is scaled by (night auto-dim
+    × the manual brightness slider). The backdrop MUST honour it: dimming only
+    the text leaves pale grey glyphs on a picture still at full blast, which
+    both destroys contrast and defeats the point of dimming at night. On top of
+    that, BACKGROUND_DIM darkens the picture alone, to buy contrast on a bright
+    or busy one without touching the text colours.
 
     Anything that stops the picture working — mode is solid, image/ is empty,
     the file vanished — lands on the solid colour rather than a black void."""
@@ -544,8 +566,18 @@ def paint_lyric_background(screen, w: int, h: int, name: str) -> None:
         surf = background_surface(name, w, h)
         if surf is not None:
             screen.blit(surf, (0, 0))
+            level = bright * (1.0 - BACKGROUND_DIM / 100.0)
+            if level < 0.999:
+                shade = _bg_shade_cache.get((w, h))
+                if shade is None:
+                    shade = pygame.Surface((w, h))
+                    shade.fill((0, 0, 0))
+                    _bg_shade_cache[(w, h)] = shade
+                shade.set_alpha(int((1.0 - max(0.0, level)) * 255))
+                screen.blit(shade, (0, 0))
             return
-    screen.fill(BACKGROUND_COLOR)
+    # Solid backdrops scale exactly — no need to blend a sheet over a fill.
+    screen.fill(scale_color(BACKGROUND_COLOR, bright))
 
 
 def write_config_values(updates: dict) -> None:
@@ -1971,18 +2003,66 @@ def brightness_factor() -> float:
     return 1.0 if is_day else NIGHT_BRIGHTNESS
 
 
+# Eight directions, so the stroke closes around a glyph instead of leaving the
+# diagonals bare.
+_OUTLINE_OFFSETS = ((-1, -1), (0, -1), (1, -1), (-1, 0),
+                    (1, 0), (-1, 1), (0, 1), (1, 1))
+
+
+def outline_width_for(size: int) -> int:
+    """Stroke thickness for a given font size — thin enough not to clog CJK
+    strokes, thick enough to read at a glance."""
+    return max(2, round(size / 30))
+
+
+def outline_color_for(color) -> tuple:
+    """The stroke colour for text of `color`: black behind light text, white
+    behind dark text.
+
+    MUST be handed the UNDIMMED colour. Night dimming drags every colour toward
+    black, so deciding from an already-dimmed colour would flip white text's
+    stroke to white the moment the display dims."""
+    return readable_text_on(color)
+
+
+def _stroked(surf, font, text, outline_color, width):
+    """`surf` composited over a stroke of the same glyphs in outline_color.
+
+    Returns a new, larger surface (grown by `width` on every side) so the stroke
+    isn't clipped. Composited BEFORE any rotation, so the stroke rides the same
+    transform as the text."""
+    w, h = surf.get_size()
+    out = pygame.Surface((w + 2 * width, h + 2 * width), pygame.SRCALPHA)
+    stroke = font.render(text, True, outline_color)
+    for dx, dy in _OUTLINE_OFFSETS:
+        out.blit(stroke, (width + dx * width, width + dy * width))
+    out.blit(surf, (width, width))
+    return out
+
+
 def draw_line(screen, text, size, bold, color, center_xy, max_len, rotate_deg,
-              font_path=FONT_PATH):
+              font_path=FONT_PATH, outline_color=None):
     """Render one centered line, shrinking the font if the text would exceed
     max_len px — so long lines never clip (one quick read per line). font_path
-    picks a non-default face (e.g. the LED clock font)."""
+    picks a non-default face (e.g. the LED clock font).
+
+    outline_color draws the glyphs over a stroke of that colour, so the line
+    reads against a picture backdrop whatever is behind it. None — the menus,
+    panels and picker, which paint on a flat background — draws plain text."""
     if not text:
         return
-    surf = get_font(size, bold, font_path).render(text, True, color)
+    eff_size = size
+    font = get_font(size, bold, font_path)
+    surf = font.render(text, True, color)
     if max_len and surf.get_width() > max_len:
         shrunk = max(8, int(size * max_len / surf.get_width()))
         if shrunk < size:
-            surf = get_font(shrunk, bold, font_path).render(text, True, color)
+            eff_size = shrunk
+            font = get_font(shrunk, bold, font_path)
+            surf = font.render(text, True, color)
+    if outline_color is not None:
+        surf = _stroked(surf, font, text, outline_color,
+                        outline_width_for(eff_size))
     if rotate_deg:
         surf = pygame.transform.rotate(surf, rotate_deg)
     screen.blit(surf, surf.get_rect(center=center_xy))
@@ -2011,7 +2091,8 @@ def _karaoke_split_px(font, words, t_ms, line_end_ms, total_w):
 
 def draw_karaoke_line(screen, text, size, bold, base_color, sung_color,
                       words, t_ms, line_start_ms, line_end_ms,
-                      center_xy, max_len, rotate_deg, font_path=FONT_PATH):
+                      center_xy, max_len, rotate_deg, font_path=FONT_PATH,
+                      outline_color=None):
     """Like draw_line, but with a KARAOKE fill: the sung part of the line is
     drawn in sung_color, the rest in base_color, split at a vertical edge that
     sweeps left→right as the song plays.
@@ -2023,10 +2104,12 @@ def draw_karaoke_line(screen, text, size, bold, base_color, sung_color,
     panel is rotated."""
     if not text:
         return
+    eff_size = size
     font = get_font(size, bold, font_path)
     if max_len and font.size(text)[0] > max_len:
         shrunk = max(8, int(size * max_len / font.size(text)[0]))
         if shrunk < size:
+            eff_size = shrunk
             font = get_font(shrunk, bold, font_path)
     base = font.render(text, True, base_color)
     total_w = base.get_width()
@@ -2043,6 +2126,11 @@ def draw_karaoke_line(screen, text, size, bold, base_color, sung_color,
         # the edge is filled part-way, which reads as a word being sung.
         sung = font.render(text, True, sung_color)
         combo.blit(sung, (0, 0), area=pygame.Rect(0, 0, split, base.get_height()))
+    # Stroke the finished two-tone line as one piece, so the sung/unsung edge
+    # keeps its own outline instead of the fill bleeding into the backdrop.
+    if outline_color is not None:
+        combo = _stroked(combo, font, text, outline_color,
+                         outline_width_for(eff_size))
     if rotate_deg:
         combo = pygame.transform.rotate(combo, rotate_deg)
     screen.blit(combo, combo.get_rect(center=center_xy))
@@ -3047,10 +3135,11 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
       rows    = {"mode": Rect, "choice": Rect, "slide": Rect}  — label strips
       choices = [(value, Rect), ...] — colour names (solid) or filenames
       slide   = {"toggle","minus","plus","value"} Rects, or None in solid mode
+      dim     = {"minus","plus","value"} Rects, or None in solid mode
       nav     = {"prev": Rect, "next": Rect} or None when everything fits
       back    = Rect
 
-    The three row bands are fixed regardless of mode, so switching Solid↔Picture
+    The four row bands are fixed regardless of mode, so switching Solid↔Picture
     doesn't make the controls jump around under the user's finger.
     """
     margin_x = max(20, int(w * 0.05))
@@ -3060,14 +3149,14 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
     notice_h = max(22, int(h * 0.09))
     gap = max(8, int(h * 0.02))
     avail = h - top - back_h - bottom_pad - notice_h - gap
-    row_h = max(44, (avail - 2 * gap) // 3)
+    row_h = max(40, (avail - 3 * gap) // 4)
 
     label_w = int(w * 0.17)
     ctrl_x = margin_x + label_w
     ctrl_w = w - margin_x - ctrl_x
 
     rows, y = {}, top
-    for name in ("mode", "choice", "slide"):
+    for name in ("mode", "choice", "slide", "dim"):
         rows[name] = pygame.Rect(margin_x, y, w - 2 * margin_x, row_h)
         y += row_h + gap
 
@@ -3131,10 +3220,24 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
         plus = pygame.Rect(value.right + gap, by, btn, bh)
         slide = {"toggle": toggle, "minus": minus, "plus": plus, "value": value}
 
+    # --- dim row: darken the picture (pictures only, same reason)
+    dim = None
+    if mode == "picture":
+        drect = rows["dim"]
+        bh = min(drect.h - 6, int(drect.h * 0.86))
+        by = drect.y + (drect.h - bh) // 2
+        btn = min(bh, max(44, int(ctrl_w * 0.07)))
+        val_w = max(90, int(ctrl_w * 0.10))
+        # Line the stepper up under the slideshow's, so the two read as a column.
+        minus = pygame.Rect(ctrl_x + int(ctrl_w * 0.22) + gap * 3, by, btn, bh)
+        value = pygame.Rect(minus.right + gap, by, val_w, bh)
+        plus = pygame.Rect(value.right + gap, by, btn, bh)
+        dim = {"minus": minus, "plus": plus, "value": value}
+
     margin_b = max(20, int(w * 0.12))
     back = pygame.Rect(margin_b, h - back_h - bottom_pad, w - 2 * margin_b,
                        back_h)
-    return rows, mode_rects, choices, slide, nav, back
+    return rows, mode_rects, choices, slide, dim, nav, back
 
 
 def draw_background(screen, w, h, page: int) -> None:
@@ -3143,7 +3246,7 @@ def draw_background(screen, w, h, page: int) -> None:
     label_font = get_font(max(16, min(32, h // 22)), True)
     btn_font = get_font(max(16, min(34, h // 20)), True)
     note_font = get_font(max(14, min(24, h // 28)), False)
-    rows, mode_rects, choices, slide, nav, back = _background_layout(
+    rows, mode_rects, choices, slide, dim, nav, back = _background_layout(
         w, h, BACKGROUND_MODE, len(list_background_images()), page)
 
     def _label(rect, text, dim=False):
@@ -3231,6 +3334,22 @@ def draw_background(screen, w, h, page: int) -> None:
         vs = btn_font.render(fmt_slideshow_interval(BACKGROUND_SLIDESHOW_S),
                              True, (255, 220, 120) if on else (120, 120, 130))
         screen.blit(vs, vs.get_rect(center=slide["value"].center))
+
+    # Dim row — pictures only; a solid backdrop has nothing to darken behind
+    # the lyrics.
+    if dim is None:
+        _label(rows["dim"], "Dim picture", dim=True)
+        s = note_font.render("(pictures only)", True, (120, 120, 130))
+        screen.blit(s, (rows["dim"].x + int(w * 0.17),
+                        rows["dim"].centery - s.get_height() // 2))
+    else:
+        _label(rows["dim"], "Dim picture")
+        for bk, sym in (("minus", "−"), ("plus", "+")):
+            pygame.draw.rect(screen, (45, 80, 130), dim[bk], border_radius=10)
+            s = btn_font.render(sym, True, (255, 255, 255))
+            screen.blit(s, s.get_rect(center=dim[bk].center))
+        ds = btn_font.render(f"{BACKGROUND_DIM}%", True, (255, 220, 120))
+        screen.blit(ds, ds.get_rect(center=dim["value"].center))
 
     # Size notice — uses the panel's REAL size, so it tells the truth on any
     # display rather than quoting a number that may not apply.
@@ -3810,12 +3929,14 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 "background_image": BACKGROUND_IMAGE,
                 "background_slideshow": BACKGROUND_SLIDESHOW,
                 "background_slideshow_s": BACKGROUND_SLIDESHOW_S,
+                "background_dim": BACKGROUND_DIM,
             })
             last_cfg_mtime = _cfg_mtime()
             print(f"[background] saved mode={BACKGROUND_MODE} "
                   f"colour={bg_color_name_of(BACKGROUND_COLOR)} "
                   f"image={BACKGROUND_IMAGE or '(first)'} "
-                  f"slideshow={BACKGROUND_SLIDESHOW}/{BACKGROUND_SLIDESHOW_S}s")
+                  f"slideshow={BACKGROUND_SLIDESHOW}/{BACKGROUND_SLIDESHOW_S}s "
+                  f"dim={BACKGROUND_DIM}%")
         except Exception as e:
             print(f"[background] save failed: {e}")
 
@@ -3824,9 +3945,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         change previews live and persists immediately, like Other Settings."""
         nonlocal menu_screen, bg_page, bg_slide_at, bg_slide_name
         global BACKGROUND_MODE, BACKGROUND_COLOR, BACKGROUND_IMAGE
-        global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S
+        global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S, BACKGROUND_DIM
         images = list_background_images()
-        rows, mode_rects, choices, slide, nav, back = _background_layout(
+        rows, mode_rects, choices, slide, dim, nav, back = _background_layout(
             w, h, BACKGROUND_MODE, len(images), bg_page)
         if back.collidepoint(lx, ly):
             menu_screen = "main"
@@ -3875,6 +3996,16 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                           BACKGROUND_SLIDESHOW_S + step)
             if new != BACKGROUND_SLIDESHOW_S:
                 BACKGROUND_SLIDESHOW_S = new
+                background_save()
+                return
+        if dim:
+            new = BACKGROUND_DIM
+            if dim["minus"].collidepoint(lx, ly):
+                new = max(0, BACKGROUND_DIM - BACKGROUND_DIM_STEP)
+            elif dim["plus"].collidepoint(lx, ly):
+                new = min(BACKGROUND_DIM_MAX, BACKGROUND_DIM + BACKGROUND_DIM_STEP)
+            if new != BACKGROUND_DIM:
+                BACKGROUND_DIM = new
                 background_save()
 
     def other_touch(lx: float, ly: float) -> None:
@@ -4292,16 +4423,23 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             elif menu_screen == "network":
                 draw_network(screen, w, h, net)
             else:
-                # Backdrop first — lyrics and the idle clock draw on top of it.
-                # Menus deliberately never get here: they keep the flat BG fill
-                # above, so their controls stay readable.
-                paint_lyric_background(screen, w, h, bg_slide_name)
                 # Night auto-dim × manual brightness, then max line width before
                 # shrink-to-fit (both honour live config changes).
                 bf = brightness_factor() * user_brightness
+                # Backdrop first — lyrics and the idle clock draw on top of it.
+                # Menus deliberately never get here: they keep the flat BG fill
+                # above, so their controls stay readable. It takes the same `bf`
+                # as the text, or dimming would fade the lyrics while leaving the
+                # picture at full brightness.
+                paint_lyric_background(screen, w, h, bg_slide_name, bf)
                 c_current = scale_color(CURRENT, bf)
                 c_next = scale_color(NEXT, bf)
                 c_prev = scale_color(PREV, bf)
+                # Strokes are picked from the UNDIMMED colours (see
+                # outline_color_for) and then dimmed alongside the text.
+                o_current = scale_color(outline_color_for(CURRENT), bf)
+                o_next = scale_color(outline_color_for(NEXT), bf)
+                o_prev = scale_color(outline_color_for(PREV), bf)
                 along = h if ROTATION_DEG in (90, 270) else w
                 max_len = int(along * MAX_LINE_WIDTH_FRAC)
 
@@ -4321,15 +4459,16 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                         if dots > 0:
                             draw_line(screen, " ".join(["●"] * dots), FONT_TOP,
                                       False, c_current, prev_pos, max_len,
-                                      ROTATION_DEG)
+                                      ROTATION_DEG, outline_color=o_current)
                         draw_line(screen, state.lines[0].text, FONT_CURRENT,
                                   CURRENT_BOLD, c_current, curr_pos, max_len,
-                                  ROTATION_DEG)
+                                  ROTATION_DEG, outline_color=o_current)
                     else:
                         if SHOW_PREV_LINE and idx - 1 >= 0:
                             draw_line(screen, state.lines[idx - 1].text,
                                       FONT_TOP, TOP_BOLD, c_prev, prev_pos,
-                                      max_len, ROTATION_DEG)
+                                      max_len, ROTATION_DEG,
+                                      outline_color=o_prev)
                         has_next = idx + 1 < len(state.lines)
                         # Current line: karaoke fill when we know its end (the
                         # next line's timestamp bounds the fill); otherwise a
@@ -4343,15 +4482,17 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                 c_current, scale_color(KARAOKE_COLOR, bf),
                                 cur.words, t_ms, cur.time_ms,
                                 state.lines[idx + 1].time_ms,
-                                curr_pos, max_len, ROTATION_DEG)
+                                curr_pos, max_len, ROTATION_DEG,
+                                outline_color=o_current)
                         else:
                             draw_line(screen, state.lines[idx].text, FONT_CURRENT,
                                       CURRENT_BOLD, c_current, curr_pos, max_len,
-                                      ROTATION_DEG)
+                                      ROTATION_DEG, outline_color=o_current)
                         if has_next:
                             draw_line(screen, state.lines[idx + 1].text,
                                       FONT_BOTTOM, BOTTOM_BOLD, c_next, next_pos,
-                                      max_len, ROTATION_DEG)
+                                      max_len, ROTATION_DEG,
+                                      outline_color=o_next)
                             # Progress bar only when karaoke is off — the fill
                             # already shows progress through the line.
                             if (PROGRESS_BAR and not KARAOKE_SYNC
@@ -4362,13 +4503,15 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     # No lyrics (yet) — show track meta with status centered.
                     if state.title:
                         draw_line(screen, state.artist or "", FONT_TOP, TOP_BOLD,
-                                  c_prev, prev_pos, max_len, ROTATION_DEG)
+                                  c_prev, prev_pos, max_len, ROTATION_DEG,
+                                  outline_color=o_prev)
                         draw_line(screen, state.title, FONT_BOTTOM, BOTTOM_BOLD,
-                                  c_next, next_pos, max_len, ROTATION_DEG)
+                                  c_next, next_pos, max_len, ROTATION_DEG,
+                                  outline_color=o_next)
                         if state.lyrics_status:
                             draw_line(screen, state.lyrics_status, FONT_CURRENT,
                                       CURRENT_BOLD, c_current, curr_pos, max_len,
-                                      ROTATION_DEG)
+                                      ROTATION_DEG, outline_color=o_current)
                     else:
                         # Idle (no track at all): just the 24h HH:MM:SS clock,
                         # grown to fill 3/4 of the screen, with the hour RED,
