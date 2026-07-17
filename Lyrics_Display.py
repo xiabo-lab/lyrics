@@ -93,7 +93,8 @@ UPDATE_FILES = (
     # are left alone — OTA only overwrites these names.
     "image/Sample 1.jpg", "image/Sample 2.jpg", "image/Sample 3.jpg",
     "image/Sample 4.png", "image/Sample 5.png", "image/Sample 6.jpg",
-    "image/Sample 7.jpg", "image/Sample 8.jpg",
+    "image/Sample 7.jpg", "image/Sample 8.jpg", "image/Sample 9.jpg",
+    "image/Sample 10.png",
 )
 UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
@@ -450,8 +451,17 @@ def _active_background_image() -> str:
     return images[0] if images else ""
 
 
+def _natural_key(name: str):
+    """Sort key that reads runs of digits as numbers.
+
+    Plain string order puts "Sample 10" between "Sample 1" and "Sample 2",
+    which looks like a bug to anyone naming files 1..10."""
+    return [int(part) if part.isdigit() else part.lower()
+            for part in re.split(r"(\d+)", name)]
+
+
 def list_background_images() -> list[str]:
-    """Filenames of the pictures in image/, case-insensitively sorted.
+    """Filenames of the pictures in image/, in natural (1, 2, … 10) order.
 
     Read fresh (not cached) so dropping a picture into the folder shows up in
     the picker without a restart. A missing/unreadable folder is not an error —
@@ -459,7 +469,7 @@ def list_background_images() -> list[str]:
     try:
         return sorted((p.name for p in IMAGE_DIR.iterdir()
                        if p.is_file() and p.suffix.lower() in BG_IMAGE_EXTS),
-                      key=str.lower)
+                      key=_natural_key)
     except OSError:
         return []
 
