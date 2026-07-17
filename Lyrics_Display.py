@@ -238,6 +238,9 @@ SETTING_COLORS = [
     ("Red",    (255, 90, 90)),
     ("Blue",   (110, 180, 255)),
     ("Purple", (200, 130, 255)),
+    # For light backdrops (a white solid, or a bright picture) — the others are
+    # all bright, which only reads against a dark background.
+    ("Black",  (0, 0, 0)),
 ]
 COLOR_BY_NAME = {name.lower(): rgb for name, rgb in SETTING_COLORS}
 
@@ -3280,8 +3283,14 @@ def _settings_layout(w: int, h: int):
     left_w = int(content_w * 0.60)
     right_x = margin_x + left_w + col_gap
     right_w = content_w - left_w - col_gap
-    sw = max(22, min(int(sec_h * 0.34), left_w // 8))
-    gap = (left_w - 6 * sw) // 5 if left_w > 6 * sw else 6
+    # Swatch geometry follows the palette's LENGTH — hardcoding the count here
+    # would silently push a newly-added colour past left_w and into the Bold
+    # button's column, where settings_touch (which tests Bold first) would eat
+    # the tap.
+    n_sw = len(SETTING_COLORS)
+    sw = max(22, min(int(sec_h * 0.34), left_w // (n_sw + 1)))
+    gap = ((left_w - n_sw * sw) // (n_sw - 1)
+           if left_w > n_sw * sw and n_sw > 1 else 6)
 
     sliders, swatches, bolds = {}, {}, {}
     sec_y = top
@@ -3354,9 +3363,12 @@ def draw_settings(screen, w, h, sizes: dict, names: dict, bolds: dict) -> None:
             first = swatches[key][0][2]
             lbl = label_font.render(label, True, (235, 235, 235))
             screen.blit(lbl, (first.x, first.y - lbl.get_height() - 8))
-        # Colour swatches; the selected one gets a white outline.
+        # Colour swatches; the selected one gets a white outline. Every swatch
+        # carries a border too, or Black would be an invisible hole in the
+        # panel's black background.
         for name, rgb, srect in swatches[key]:
             pygame.draw.rect(screen, rgb, srect, border_radius=8)
+            pygame.draw.rect(screen, (90, 90, 100), srect, 2, border_radius=8)
             if names.get(key) == name.lower():
                 pygame.draw.rect(screen, (255, 255, 255), srect.inflate(10, 10),
                                  3, border_radius=11)
