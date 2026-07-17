@@ -8,6 +8,25 @@ The current line **fills with colour in time with the song**, word-by-word where
 the source provides it (Kugou KRC / QQ QRC), so it reads like real karaoke. See
 **Word-level karaoke** in the [Pi Zero 2W guide](README_Pi_Zero_2W.md).
 
+Everything below is set on the screen itself — long-press the display for 10
+seconds to open Settings. Nothing needs a keyboard or a config file.
+
+## Look and feel
+
+- **Font Settings** — size, weight and colour for the top / current / bottom
+  lines, plus the karaoke fill colour. Eight colours, including Black and Brown
+  for use over a light backdrop.
+- **Background Picture** — the lyric screen's backdrop is either a solid colour
+  (Black, White, Grey, Light Brown, Sky Blue) or a picture from `image/`, with
+  an optional slideshow (30 min – 4 h) and a **Dim picture** control for busy
+  or bright pictures. Drop your own images into `image/` and they appear in the
+  picker without a restart — no update overwrites them.
+  > Pictures are scaled to **fill** the panel and centre-cropped, so match your
+  > panel's aspect ratio (the screen tells you its exact size) or the top and
+  > bottom of the image are trimmed.
+- Lyrics are drawn with an **outline**, so they stay readable over any picture,
+  and the backdrop dims along with the text at night.
+
 ## Setup guides
 
 Pick the guide for your board:

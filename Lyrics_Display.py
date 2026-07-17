@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.9.5"
+APP_VERSION = "1.10.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
