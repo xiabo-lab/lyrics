@@ -9,7 +9,8 @@ from lrclib import LyricLine, Word, parse_lrc, shift_lrc_timestamps
 from lyric_sources import (GRID_MAX, best_candidate, build_grid,
                            score_candidate, _krc_to_enhanced_lrc,
                            _qrc_to_enhanced_lrc)
-from Lyrics_Display import decide_lock, find_current_index
+from Lyrics_Display import (decide_lock, decide_startup_backstep,
+                            find_current_index)
 
 
 def _cand(source, title, artist, lines=20):
@@ -89,6 +90,37 @@ class DecideLockTests(unittest.TestCase):
     def test_no_track_change_timestamp_keeps_waiting_on_stale(self):
         # elapsed_s is None until a track change / attach is recorded.
         self.assertFalse(decide_lock(120000, None, self.FRESH, self.TIMEOUT)[0])
+
+
+class DecideStartupBackstepTests(unittest.TestCase):
+    GUARD = 3.0
+    TOL = 250
+
+    def test_real_captured_stale_report_is_refused(self):
+        # Captured from an iPhone/YouTube Music skip: locked at 198ms, then the
+        # phone reported 305ms 690ms later — our clock says 888ms, so the report
+        # walks us ~580ms backward. Taking it is what left lyrics ~1s late.
+        self.assertTrue(
+            decide_startup_backstep(305, 888, 1.14, self.GUARD, self.TOL))
+
+    def test_forward_report_is_always_taken(self):
+        self.assertFalse(
+            decide_startup_backstep(1500, 900, 1.0, self.GUARD, self.TOL))
+
+    def test_small_backward_jitter_is_taken(self):
+        # Within tolerance — ordinary jitter, not a stale queued report.
+        self.assertFalse(
+            decide_startup_backstep(880, 1000, 1.0, self.GUARD, self.TOL))
+
+    def test_backstep_after_guard_window_is_taken(self):
+        # Past the start-up burst a backward step is a real seek, or the phone
+        # correcting itself after buffering — both must be honoured.
+        self.assertFalse(
+            decide_startup_backstep(305, 888, 9.0, self.GUARD, self.TOL))
+
+    def test_no_track_change_timestamp_takes_the_report(self):
+        self.assertFalse(
+            decide_startup_backstep(305, 888, None, self.GUARD, self.TOL))
 
 
 class ScoreCandidateTests(unittest.TestCase):

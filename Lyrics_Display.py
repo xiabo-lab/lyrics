@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.9.2"
+APP_VERSION = "1.9.3"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -515,12 +515,12 @@ async def fetch_lyrics_for(state: State, title: str, artist: str) -> None:
 
 
 class AvrcpWatcher:
-    # Poll Position every this-many seconds. We're NOT polling to force a
-    # refresh — BlueZ returns whatever the iPhone last broadcast (cached).
-    # We poll so that whenever the iPhone DOES broadcast (on play/pause/
-    # skip, or — for cooperative apps like Apple Music — continuously
-    # during playback and on scrub), we catch the new value within
-    # POLL_INTERVAL_S even if the PropertiesChanged signal got missed.
+    # Poll Position every this-many seconds. BlueZ does NOT hand back a frozen
+    # cache between broadcasts: it extrapolates Position from its own timer, so
+    # every read advances (measured on BlueZ 5.82: 13533, 13634, 13735… at 100ms
+    # intervals). Polling therefore agrees with our own extrapolation in the
+    # steady state; its job is to re-adopt BlueZ's clock whenever the phone
+    # broadcasts a fresh value and the PropertiesChanged signal got missed.
     POLL_INTERVAL_S = 0.5
     # Only print a [seek] line in logs when the delta exceeds this; smaller
     # adjustments still snap silently to avoid log spam during the
@@ -537,6 +537,18 @@ class AvrcpWatcher:
     # this window (e.g. resuming mid-track, or a player that just never
     # re-broadcasts), anchor to whatever we have so lyrics don't hang.
     STABILIZE_TIMEOUT_S = 5.0
+    # Right after a track change the phone's Position reports queue up behind
+    # its track-metadata burst and land ~1s stale, each one staler than the last
+    # (measured, iPhone/YouTube Music: 198ms, then 305ms 690ms later — i.e. a
+    # clock that walks BACKWARD). Inside this window we refuse to let one of
+    # those drag our clock back. See _startup_backstep.
+    STARTUP_GUARD_S = 3.0
+    # A start-up report has to undercut our clock by more than this to count as
+    # stale rather than ordinary jitter.
+    STARTUP_BACKSTEP_MS = 250
+    # How far a polled Position must depart from BlueZ's own extrapolation
+    # before we read it as a fresh phone broadcast rather than BlueZ ticking.
+    REBROADCAST_MS = 150
     # How often to (re)attempt connecting any paired-but-disconnected phone.
     AUTOCONNECT_INTERVAL_S = 15.0
 
@@ -550,13 +562,20 @@ class AvrcpWatcher:
         self.poll_task: asyncio.Task | None = None
         self.autoconnect_task: asyncio.Task | None = None
         self._om = None              # ObjectManager, cached for auto-connect
-        # Last raw Position value we read from BlueZ. We only snap when
-        # this changes between polls — otherwise BlueZ is returning a
-        # stale cache (iPhone hasn't broadcast since) and snapping would
-        # pull us BACKWARD in time, which is worse than doing nothing.
+        # Last raw Position value we read from BlueZ, and when we read it.
+        # Together they reconstruct BlueZ's own extrapolation, so the poller can
+        # tell a fresh phone broadcast (value departs from that line) from BlueZ
+        # simply ticking its timer.
         self._last_polled_ms: int | None = None
+        self._last_poll_at: float | None = None
+        # How far our clock sits AHEAD of BlueZ's, in ms. Non-zero only after we
+        # reject a stale start-up report: BlueZ re-anchors its timer to every
+        # value the phone sends, including the ones we refuse, so from then on
+        # its Position reads low by a fixed amount. Cleared on a track change and
+        # whenever the phone broadcasts something we do trust.
+        self._bluez_skew_ms: int = 0
         # monotonic() at the last track change — gates the fresh-start
-        # stabilize timeout (see _try_lock).
+        # stabilize timeout (see _try_lock) and the start-up backstep guard.
         self._track_changed_at: float | None = None
 
     async def start(self) -> None:
@@ -677,25 +696,63 @@ class AvrcpWatcher:
                 self._try_lock(real_ms)
                 continue
 
-            # Locked. Only snap when the value actually CHANGES — an
-            # unchanged read means BlueZ is serving a stale cache (iPhone
-            # hasn't broadcast since), and re-anchoring to it every poll
-            # would pin our clock and stop extrapolation.
-            if self._last_polled_ms is None:
-                self._last_polled_ms = real_ms
-                continue
-            if real_ms == self._last_polled_ms:
-                continue
-            self._last_polled_ms = real_ms
+            # Locked. Work out whether BlueZ re-anchored since the last poll
+            # (the phone broadcast a fresh Position) or is just ticking its own
+            # timer, by comparing against the line BlueZ was already on.
+            now = time.monotonic()
+            if self._last_polled_ms is not None and self._last_poll_at is not None:
+                bluez_tick = self._last_polled_ms + int(
+                    (now - self._last_poll_at) * 1000)
+                if abs(real_ms - bluez_tick) > self.REBROADCAST_MS:
+                    if self._startup_backstep(real_ms, now):
+                        self._note_startup_backstep(real_ms, now)
+                        self._last_polled_ms, self._last_poll_at = real_ms, now
+                        continue
+                    # A broadcast we trust (play/pause, seek, or the phone
+                    # correcting itself after buffering) — BlueZ is authoritative
+                    # again, so stop carrying any skew.
+                    self._bluez_skew_ms = 0
+            self._last_polled_ms, self._last_poll_at = real_ms, now
 
-            # iPhone broadcast fresh value → trust it.
+            corrected = real_ms + self._bluez_skew_ms
             expected = self.state.position_ms + int(
-                (time.monotonic() - self.state.position_at_mono) * 1000
+                (now - self.state.position_at_mono) * 1000
             )
-            delta = real_ms - expected
-            self.state.set_position(real_ms)
+            delta = corrected - expected
+            self.state.set_position(corrected)
             if abs(delta) > self.SEEK_LOG_THRESHOLD_MS:
-                print(f"[seek]     snap: expected {expected}ms, real {real_ms}ms (Δ {delta:+d}ms)")
+                print(f"[seek]     snap: expected {expected}ms, real {corrected}ms (Δ {delta:+d}ms)")
+
+    def _clock_ms(self, now: float) -> int:
+        """Our own extrapolated playback clock, without the display offsets."""
+        return self.state.position_ms + int(
+            (now - self.state.position_at_mono) * 1000)
+
+    def _startup_backstep(self, real_ms: int, now: float) -> bool:
+        """Is real_ms one of the phone's stale track-start reports?
+
+        See decide_startup_backstep for the policy and its rationale.
+        """
+        elapsed = (
+            None if self._track_changed_at is None
+            else now - self._track_changed_at
+        )
+        return decide_startup_backstep(
+            real_ms, self._clock_ms(now), elapsed,
+            self.STARTUP_GUARD_S, self.STARTUP_BACKSTEP_MS)
+
+    def _note_startup_backstep(self, real_ms: int, now: float) -> None:
+        """Keep our clock, and record how far BlueZ just fell behind it.
+
+        BlueZ re-anchors its timer to every value the phone sends — including
+        the stale ones we reject — so from here its Position reads low by a
+        fixed amount. Holding that skew lets the poller keep re-adopting BlueZ
+        without walking us back onto the stale anchor we just refused.
+        """
+        clock = self._clock_ms(now)
+        self._bluez_skew_ms = clock - real_ms
+        print(f"[sync]     ignoring stale start-up position {real_ms}ms "
+              f"(clock {clock}ms, BlueZ skew {self._bluez_skew_ms:+d}ms)")
 
     def _try_lock(self, real_ms: int) -> None:
         """Anchor onto a new track, but only to a trustworthy position.
@@ -711,7 +768,7 @@ class AvrcpWatcher:
         real fresh start) OR the stabilize window has elapsed (fallback so
         lyrics never hang, e.g. when resuming mid-track).
         """
-        self._last_polled_ms = real_ms
+        self._last_polled_ms, self._last_poll_at = real_ms, time.monotonic()
         elapsed = (
             None if self._track_changed_at is None
             else time.monotonic() - self._track_changed_at
@@ -818,6 +875,8 @@ class AvrcpWatcher:
                 self.state.position_at_mono = time.monotonic()
                 self.state.song_offset_ms = 0   # new song starts un-nudged
                 self._last_polled_ms = None
+                self._last_poll_at = None
+                self._bluez_skew_ms = 0
                 self._track_changed_at = time.monotonic()
                 track_changed = True
                 self.start_fetch(title, artist)
@@ -841,10 +900,20 @@ class AvrcpWatcher:
                 # same freshness gate, so a stale value can't anchor us.
                 self._try_lock(pos)
             else:
-                # Locked: a PropertiesChanged Position is always a real
-                # iPhone broadcast (never a stale poll cache) → re-anchor.
+                now = time.monotonic()
+                # Locked. A PropertiesChanged Position is a real broadcast, but
+                # during the track-start burst it is a LATE one — later reports
+                # are staler than the first, so taking them makes the anchor
+                # worse, not better.
+                if self._startup_backstep(pos, now):
+                    self._note_startup_backstep(pos, now)
+                    self._last_polled_ms, self._last_poll_at = pos, now
+                    return
+                # Outside that burst the phone is telling the truth (play/pause,
+                # seek, a correction after buffering) → take it, drop any skew.
+                self._bluez_skew_ms = 0
                 self.state.set_position(pos)
-                self._last_polled_ms = pos
+                self._last_polled_ms, self._last_poll_at = pos, now
 
 
 async def disconnect_other_devices(bus, om, keep_path: str) -> None:
@@ -1574,6 +1643,28 @@ def decide_lock(real_ms, elapsed_s, fresh_max_ms, timeout_s):
     if elapsed_s is not None and elapsed_s > timeout_s:
         return (True, "stabilize timeout")
     return (False, "waiting")
+
+
+def decide_startup_backstep(real_ms, clock_ms, elapsed_s, guard_s, tol_ms):
+    """Pure policy: is a just-received Position a stale track-start report that
+    we should refuse rather than anchor to?
+
+    Right after a track change the phone's Position reports queue up behind its
+    track-metadata burst and land ~1s late, each one staler than the last —
+    measured on an iPhone running YouTube Music: locked at 198ms, then told
+    305ms 690ms later, i.e. a clock walking BACKWARD by ~580ms. Adopting one
+    pins the lyrics that far behind the music for the WHOLE song, because
+    YouTube Music broadcasts nothing else until the user pauses/plays.
+
+    A song plays forward, so only a seek can legitimately move the clock back,
+    and only inside the start-up window do we override that: a seek in the first
+    seconds of a track is rare, and self-corrects on the next broadcast.
+
+    Kept free of BlueZ/pygame so it's unit-testable, like decide_lock.
+    """
+    if elapsed_s is None or elapsed_s > guard_s:
+        return False
+    return real_ms < clock_ms - tol_ms
 
 
 def _line_positions(w: int, h: int):
