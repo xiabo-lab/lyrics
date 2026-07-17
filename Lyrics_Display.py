@@ -88,6 +88,10 @@ UPDATE_FILES = (
     # subdir) so the OTA apply loop copies them even on older installs.
     "Aldrich-Regular.ttc", "advanced_led_board-7.ttc",
     "qq music icon.jpg", "kugou icon.jpg", "netease icon.png", "lrclib icon.png",
+    # Stock backdrops for Settings → Background Picture. Subdir entries are fine
+    # (the apply loop mkdirs parents). A user's own pictures dropped into image/
+    # are left alone — OTA only overwrites these names.
+    "image/Morning.png", "image/Afternoon.png", "image/Dark.png",
 )
 UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
@@ -98,7 +102,30 @@ UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 AVRCP_UUID = "0000110e-0000-1000-8000-00805f9b34fb"
 
 # ---- Display --------------------------------------------------------------
-BG = (0, 0, 0)
+BG = (0, 0, 0)   # menus/picker/panels always paint on this, so controls read
+# Backdrop of the LYRIC screen (and the idle clock) only — never the menus, so
+# a photo can't make the settings controls unreadable. Either a flat colour or
+# a picture from image/. Live values come from background_* in config.json,
+# editable on-screen via Settings → Background Picture.
+BACKGROUND_MODE = "solid"          # "solid" | "picture"
+BACKGROUND_COLOR = (0, 0, 0)       # one of BG_SOLID_COLORS (solid mode)
+BACKGROUND_IMAGE = ""              # filename inside image/; "" = first found
+BACKGROUND_SLIDESHOW = False       # picture mode: cycle through image/
+BACKGROUND_SLIDESHOW_S = 60        # seconds per picture when the slideshow runs
+BACKGROUND_SLIDESHOW_MIN_S = 5
+BACKGROUND_SLIDESHOW_MAX_S = 600
+# The three flat backdrops. Deliberately NOT SETTING_COLORS: those are text
+# colours (all bright, to read against black), which is the opposite of what a
+# backdrop needs.
+BG_SOLID_COLORS = (
+    ("Black", (0, 0, 0)),
+    ("White", (235, 235, 235)),
+    ("Grey", (110, 110, 110)),
+)
+BG_COLOR_BY_NAME = {name.lower(): rgb for name, rgb in BG_SOLID_COLORS}
+# Pictures live here, so a user can drop their own in beside the shipped three.
+IMAGE_DIR = INSTALL_DIR / "image"
+BG_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
 # Driving legibility: a strong size + brightness gap between the "now" line
 # and its neighbours lets your eye lock onto the current line at a glance.
 # Per-line colours. These are DEFAULTS; the live values are set from the
@@ -253,7 +280,22 @@ _CONFIG_DEFAULTS = {
     "auto_recover": AUTO_RECOVER,
     "karaoke_sync": KARAOKE_SYNC,
     "karaoke_color": color_name_of(KARAOKE_COLOR),
+    "background_mode": BACKGROUND_MODE,
+    "background_color": "black",
+    "background_image": BACKGROUND_IMAGE,
+    "background_slideshow": BACKGROUND_SLIDESHOW,
+    "background_slideshow_s": BACKGROUND_SLIDESHOW_S,
 }
+
+# String config keys that are NOT colours. Without these, load_config would
+# validate every string against the colour palette and throw them out.
+_ENUM_KEYS = {
+    "background_mode": {"solid", "picture"},
+    "background_color": set(BG_COLOR_BY_NAME),
+}
+# Free-form strings (a filename we can't validate here — the picture may be
+# added to image/ later, and a missing one falls back to the solid colour).
+_FREE_STRING_KEYS = {"background_image"}
 
 
 def load_config() -> dict:
@@ -282,7 +324,20 @@ def load_config() -> dict:
             else:
                 print(f"[config] ignoring non-bool {key}={val!r}")
         elif isinstance(default, str):
-            if isinstance(val, str) and val.lower() in COLOR_BY_NAME:
+            # String keys are NOT all colours: background_mode/background_color
+            # are small enums and background_image is a free-form filename, so
+            # validate by key rather than assuming the colour palette.
+            if not isinstance(val, str):
+                print(f"[config] ignoring non-string {key}={val!r}")
+            elif key in _ENUM_KEYS:
+                if val.lower() in _ENUM_KEYS[key]:
+                    cfg[key] = val.lower()
+                else:
+                    print(f"[config] ignoring invalid {key}={val!r} "
+                          f"(expected one of {sorted(_ENUM_KEYS[key])})")
+            elif key in _FREE_STRING_KEYS:
+                cfg[key] = val
+            elif val.lower() in COLOR_BY_NAME:
                 cfg[key] = val.lower()
             else:
                 print(f"[config] ignoring invalid colour {key}={val!r}")
@@ -319,6 +374,8 @@ def apply_config() -> None:
     global PROGRESS_BAR, DIM_ENABLED, DAY_START_HOUR, NIGHT_START_HOUR
     global NIGHT_BRIGHTNESS, MAX_LINE_WIDTH_FRAC, AUTOCONNECT, FLIP_180
     global AUTO_RECOVER, KARAOKE_SYNC, KARAOKE_COLOR
+    global BACKGROUND_MODE, BACKGROUND_COLOR, BACKGROUND_IMAGE
+    global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S
     cfg = load_config()
     LATENCY_OFFSET_MS = cfg["latency_offset_ms"]
     LEAD_OFFSET_MS = cfg["lead_offset_ms"]
@@ -347,6 +404,102 @@ def apply_config() -> None:
     AUTO_RECOVER = cfg["auto_recover"]
     KARAOKE_SYNC = cfg["karaoke_sync"]
     KARAOKE_COLOR = COLOR_BY_NAME[cfg["karaoke_color"]]
+    BACKGROUND_MODE = cfg["background_mode"]
+    BACKGROUND_COLOR = BG_COLOR_BY_NAME[cfg["background_color"]]
+    BACKGROUND_IMAGE = cfg["background_image"]
+    BACKGROUND_SLIDESHOW = cfg["background_slideshow"]
+    BACKGROUND_SLIDESHOW_S = max(BACKGROUND_SLIDESHOW_MIN_S,
+                                 min(BACKGROUND_SLIDESHOW_MAX_S,
+                                     cfg["background_slideshow_s"]))
+
+
+def bg_color_name_of(rgb) -> str:
+    """Backdrop rgb → its palette name; falls back to the first (Black)."""
+    for name, c in BG_SOLID_COLORS:
+        if tuple(c) == tuple(rgb):
+            return name.lower()
+    return BG_SOLID_COLORS[0][0].lower()
+
+
+def _active_background_image() -> str:
+    """The picture to show: the configured one, else the first in image/.
+
+    Falling back to the first means picking "Picture" mode does something
+    sensible before a file has ever been chosen, and that a configured picture
+    which has since been deleted doesn't leave a blank screen."""
+    images = list_background_images()
+    if BACKGROUND_IMAGE in images:
+        return BACKGROUND_IMAGE
+    return images[0] if images else ""
+
+
+def list_background_images() -> list[str]:
+    """Filenames of the pictures in image/, case-insensitively sorted.
+
+    Read fresh (not cached) so dropping a picture into the folder shows up in
+    the picker without a restart. A missing/unreadable folder is not an error —
+    the background just falls back to a solid colour."""
+    try:
+        return sorted((p.name for p in IMAGE_DIR.iterdir()
+                       if p.is_file() and p.suffix.lower() in BG_IMAGE_EXTS),
+                      key=str.lower)
+    except OSError:
+        return []
+
+
+# Scaled backdrops, keyed by (filename, w, h). Scaling a ~2MB PNG takes long
+# enough to drop frames, and the result is identical every frame, so do it once.
+# Also holds the small picker thumbnails (same call, tile-sized).
+_bg_surface_cache: dict = {}
+
+
+def _scale_cover(surf, w: int, h: int):
+    """Scale `surf` to COVER w×h, centre-cropping the overflow.
+
+    Fills the screen without distorting, at the cost of cropping whatever
+    doesn't fit — the usual backdrop behaviour, and why the screen tells users
+    to supply images at the panel's own aspect ratio."""
+    sw, sh = surf.get_size()
+    if sw <= 0 or sh <= 0:
+        return None
+    factor = max(w / sw, h / sh)
+    tw, th = max(1, round(sw * factor)), max(1, round(sh * factor))
+    scaled = pygame.transform.smoothscale(surf, (tw, th))
+    out = pygame.Surface((w, h))
+    out.blit(scaled, ((w - tw) // 2, (h - th) // 2))
+    return out
+
+
+def background_surface(name: str, w: int, h: int):
+    """image/<name> scaled to cover w×h, or None if it can't be used.
+
+    Failures (missing file, corrupt image) are cached as None so a broken
+    picture costs one log line, not a decode attempt every frame."""
+    key = (name, w, h)
+    if key in _bg_surface_cache:
+        return _bg_surface_cache[key]
+    surf = None
+    if name:
+        try:
+            raw = pygame.image.load(str(IMAGE_DIR / name)).convert()
+            surf = _scale_cover(raw, w, h)
+        except Exception as e:
+            print(f"[background] cannot load {name}: {e}")
+    _bg_surface_cache[key] = surf
+    return surf
+
+
+def paint_lyric_background(screen, w: int, h: int, name: str) -> None:
+    """Paint the lyric screen's backdrop: a picture, else the solid colour.
+
+    Anything that stops the picture working — mode is solid, image/ is empty,
+    the file vanished — lands on the solid colour rather than a black void."""
+    if BACKGROUND_MODE == "picture":
+        surf = background_surface(name, w, h)
+        if surf is not None:
+            screen.blit(surf, (0, 0))
+            return
+    screen.fill(BACKGROUND_COLOR)
 
 
 def write_config_values(updates: dict) -> None:
@@ -2530,6 +2683,7 @@ def _draw_brightness_bar(screen, w, h, level, btn_w):
 # the lyrics). Each entry is (screen-key, button label) in draw order.
 MAIN_MENU_ITEMS = (
     ("font", "Font Settings"),
+    ("background", "Background Picture"),
     ("bluetooth", "Bluetooth"),
     ("other", "Other Settings"),
     ("network", "Network"),
@@ -2834,8 +2988,213 @@ def draw_other(screen, w, h) -> None:
     screen.blit(bl, bl.get_rect(center=back.center))
 
 
+# ---- Background screen -----------------------------------------------------
+# How many picture tiles fit on one page before we paginate. The panel is wide
+# but short, so tiles go in a single row.
+BG_TILES_PER_PAGE = 5
+
+
+def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
+    """Geometry for the Background Picture screen, in LOGICAL (pre-flip) px.
+
+    Returns (rows, choices, slide, nav, back):
+      rows    = {"mode": Rect, "choice": Rect, "slide": Rect}  — label strips
+      choices = [(value, Rect), ...] — colour names (solid) or filenames
+      slide   = {"toggle","minus","plus","value"} Rects, or None in solid mode
+      nav     = {"prev": Rect, "next": Rect} or None when everything fits
+      back    = Rect
+
+    The three row bands are fixed regardless of mode, so switching Solid↔Picture
+    doesn't make the controls jump around under the user's finger.
+    """
+    margin_x = max(20, int(w * 0.05))
+    top = int(h * 0.06)
+    back_h = max(44, int(h * 0.15))
+    bottom_pad = int(h * 0.03)
+    notice_h = max(22, int(h * 0.09))
+    gap = max(8, int(h * 0.02))
+    avail = h - top - back_h - bottom_pad - notice_h - gap
+    row_h = max(44, (avail - 2 * gap) // 3)
+
+    label_w = int(w * 0.17)
+    ctrl_x = margin_x + label_w
+    ctrl_w = w - margin_x - ctrl_x
+
+    rows, y = {}, top
+    for name in ("mode", "choice", "slide"):
+        rows[name] = pygame.Rect(margin_x, y, w - 2 * margin_x, row_h)
+        y += row_h + gap
+
+    def _btn_row(rect, values, count):
+        """Evenly split `rect`'s control column into `count` buttons."""
+        bgap = max(8, int(ctrl_w * 0.015))
+        bw = (ctrl_w - (count - 1) * bgap) // max(1, count)
+        bh = min(rect.h - 6, int(rect.h * 0.86))
+        by = rect.y + (rect.h - bh) // 2
+        return [(v, pygame.Rect(ctrl_x + i * (bw + bgap), by, bw, bh))
+                for i, v in enumerate(values)]
+
+    # --- mode row: Solid | Picture
+    mode_rects = _btn_row(rows["mode"], ("solid", "picture"), 2)
+
+    # --- choice row: three flat colours, or one page of picture tiles
+    nav = None
+    if mode == "solid":
+        choices = _btn_row(rows["choice"],
+                           [n.lower() for n, _rgb in BG_SOLID_COLORS], 3)
+    else:
+        images = list_background_images()
+        n_images = len(images)
+        pages = max(1, (n_images + BG_TILES_PER_PAGE - 1) // BG_TILES_PER_PAGE)
+        page = max(0, min(page, pages - 1))
+        shown = images[page * BG_TILES_PER_PAGE:(page + 1) * BG_TILES_PER_PAGE]
+        crect = rows["choice"]
+        if pages > 1:
+            # Reserve arrows at both ends, tiles share what's left.
+            aw = max(36, int(ctrl_w * 0.05))
+            nav = {"prev": pygame.Rect(ctrl_x, crect.y, aw, crect.h),
+                   "next": pygame.Rect(w - margin_x - aw, crect.y, aw, crect.h)}
+            tiles_x = ctrl_x + aw + gap
+            tiles_w = (w - margin_x - aw - gap) - tiles_x
+        else:
+            tiles_x, tiles_w = ctrl_x, ctrl_w
+        choices = []
+        if shown:
+            tgap = max(8, int(tiles_w * 0.015))
+            tw = (tiles_w - (len(shown) - 1) * tgap) // len(shown)
+            for i, nm in enumerate(shown):
+                choices.append((nm, pygame.Rect(tiles_x + i * (tw + tgap),
+                                                crect.y, tw, crect.h)))
+
+    # --- slideshow row: Yes/No + interval stepper (pictures only)
+    slide = None
+    if mode == "picture":
+        srect = rows["slide"]
+        bh = min(srect.h - 6, int(srect.h * 0.86))
+        by = srect.y + (srect.h - bh) // 2
+        tw = int(ctrl_w * 0.22)
+        toggle = pygame.Rect(ctrl_x, by, tw, bh)
+        btn = min(bh, int(ctrl_w * 0.10))
+        minus = pygame.Rect(ctrl_x + tw + gap * 2, by, btn, bh)
+        plus = pygame.Rect(w - margin_x - btn, by, btn, bh)
+        value = pygame.Rect(minus.right, by, plus.left - minus.right, bh)
+        slide = {"toggle": toggle, "minus": minus, "plus": plus, "value": value}
+
+    margin_b = max(20, int(w * 0.12))
+    back = pygame.Rect(margin_b, h - back_h - bottom_pad, w - 2 * margin_b,
+                       back_h)
+    return rows, mode_rects, choices, slide, nav, back
+
+
+def draw_background(screen, w, h, page: int) -> None:
+    """Render the Background Picture screen. Reads the live globals."""
+    screen.fill(BG)
+    label_font = get_font(max(16, min(32, h // 22)), True)
+    btn_font = get_font(max(16, min(34, h // 20)), True)
+    note_font = get_font(max(14, min(24, h // 28)), False)
+    rows, mode_rects, choices, slide, nav, back = _background_layout(
+        w, h, BACKGROUND_MODE, len(list_background_images()), page)
+
+    def _label(rect, text, dim=False):
+        s = label_font.render(text, True, (120, 120, 130) if dim
+                              else (235, 235, 235))
+        screen.blit(s, (rect.x + 4, rect.centery - s.get_height() // 2))
+
+    # Mode row.
+    _label(rows["mode"], "Background")
+    for value, r in mode_rects:
+        on = BACKGROUND_MODE == value
+        pygame.draw.rect(screen, (40, 120, 50) if on else (45, 45, 58), r,
+                         border_radius=12)
+        s = btn_font.render("Solid Colour" if value == "solid" else "Picture",
+                            True, (255, 255, 255) if on else (200, 200, 200))
+        screen.blit(s, s.get_rect(center=r.center))
+
+    # Choice row.
+    if BACKGROUND_MODE == "solid":
+        _label(rows["choice"], "Colour")
+        for value, r in choices:
+            pygame.draw.rect(screen, BG_COLOR_BY_NAME[value], r,
+                             border_radius=10)
+            # Black on black needs an outline to be visible at all.
+            pygame.draw.rect(screen, (90, 90, 100), r, 2, border_radius=10)
+            if bg_color_name_of(BACKGROUND_COLOR) == value:
+                pygame.draw.rect(screen, (255, 255, 255), r.inflate(8, 8), 3,
+                                 border_radius=13)
+            txt = value.capitalize()
+            s = btn_font.render(txt, True, (0, 0, 0) if value == "white"
+                                else (235, 235, 235))
+            screen.blit(s, s.get_rect(center=r.center))
+    else:
+        _label(rows["choice"], "Picture")
+        if not choices:
+            s = note_font.render(
+                f"No pictures in image/ — copy {w} x {h} images there.",
+                True, (255, 170, 90))
+            screen.blit(s, (rows["choice"].x + int(w * 0.17),
+                            rows["choice"].centery - s.get_height() // 2))
+        for value, r in choices:
+            thumb = background_surface(value, r.w, r.h)
+            if thumb is not None:
+                screen.blit(thumb, r.topleft)
+            else:
+                pygame.draw.rect(screen, (60, 60, 70), r, border_radius=10)
+            # Caption on a dark strip so it reads over any picture.
+            cap = note_font.render(Path(value).stem, True, (245, 245, 245))
+            strip = pygame.Rect(r.x, r.bottom - cap.get_height() - 6, r.w,
+                                cap.get_height() + 6)
+            shade = pygame.Surface((strip.w, strip.h))
+            shade.set_alpha(150)
+            shade.fill((0, 0, 0))
+            screen.blit(shade, strip.topleft)
+            screen.blit(cap, cap.get_rect(center=strip.center))
+            if value == _active_background_image():
+                pygame.draw.rect(screen, (255, 255, 255), r, 4,
+                                 border_radius=10)
+        if nav:
+            for nk, sym in (("prev", "‹"), ("next", "›")):
+                pygame.draw.rect(screen, (45, 45, 58), nav[nk],
+                                 border_radius=10)
+                s = btn_font.render(sym, True, (235, 235, 235))
+                screen.blit(s, s.get_rect(center=nav[nk].center))
+
+    # Slideshow row — pictures only; there is nothing to cycle through when the
+    # background is one flat colour.
+    if slide is None:
+        _label(rows["slide"], "Slideshow", dim=True)
+        s = note_font.render("(pictures only)", True, (120, 120, 130))
+        screen.blit(s, (rows["slide"].x + int(w * 0.17),
+                        rows["slide"].centery - s.get_height() // 2))
+    else:
+        _label(rows["slide"], "Slideshow")
+        on = BACKGROUND_SLIDESHOW
+        pygame.draw.rect(screen, (40, 120, 50) if on else (95, 55, 55),
+                         slide["toggle"], border_radius=12)
+        s = btn_font.render("Yes" if on else "No", True, (255, 255, 255))
+        screen.blit(s, s.get_rect(center=slide["toggle"].center))
+        for bk, sym in (("minus", "−"), ("plus", "+")):
+            pygame.draw.rect(screen, (45, 80, 130) if on else (50, 50, 60),
+                             slide[bk], border_radius=10)
+            s = btn_font.render(sym, True, (255, 255, 255) if on
+                                else (120, 120, 130))
+            screen.blit(s, s.get_rect(center=slide[bk].center))
+        vs = btn_font.render(f"{BACKGROUND_SLIDESHOW_S}s", True,
+                             (255, 220, 120) if on else (120, 120, 130))
+        screen.blit(vs, vs.get_rect(center=slide["value"].center))
+
+    # Size notice — uses the panel's REAL size, so it tells the truth on any
+    # display rather than quoting a number that may not apply.
+    note = note_font.render(
+        f"Pictures look best at {w} x {h}. Others are scaled to fill and "
+        f"centre-cropped.", True, (150, 150, 160))
+    screen.blit(note, (max(20, int(w * 0.05)), back.y - note.get_height() - 6))
+
+    pygame.draw.rect(screen, (45, 45, 58), back, border_radius=14)
+    bl = btn_font.render("Back", True, (235, 235, 235))
+    screen.blit(bl, bl.get_rect(center=back.center))
+
+
 # Settings panel rows, in top-to-bottom display order. Each is
-# (key, human label). The key indexes into the live font/colour globals.
 # (key, label, sized). sized=False means the row is colour-only: no size slider
 # and no Bold toggle, because it borrows another row's font. The karaoke fill is
 # drawn in the CURRENT line's font/size/bold — only its colour is its own — so
@@ -3101,6 +3460,15 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                        "top": color_name_of(PREV),
                        "bottom": color_name_of(NEXT),
                        "karaoke": color_name_of(KARAOKE_COLOR)}
+    # Background screen: which tile page is shown, and when the slideshow last
+    # advanced. bg_slide_name is the picture actually on screen — held separately
+    # from BACKGROUND_IMAGE so a slideshow can move on without overwriting (and
+    # persisting) the user's chosen picture.
+    bg_page = 0
+    bg_slide_at = time.monotonic()
+    bg_slide_name = ""
+    bg_images: list[str] = []
+    bg_images_at = 0.0     # last image/ scan; 0.0 forces one on the first frame
 
     def _logical_x(nx: float) -> float:
         """Normalized touch x (0..1) → logical pixel x, undoing FLIP_180 so a
@@ -3372,6 +3740,83 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         except Exception as e:
             print(f"[other] save failed: {e}")
 
+    def background_save() -> None:
+        """Persist the background settings and bump last_cfg_mtime so the
+        hot-reload watcher doesn't re-apply (and log) our own write."""
+        nonlocal last_cfg_mtime
+        try:
+            write_config_values({
+                "background_mode": BACKGROUND_MODE,
+                "background_color": bg_color_name_of(BACKGROUND_COLOR),
+                "background_image": BACKGROUND_IMAGE,
+                "background_slideshow": BACKGROUND_SLIDESHOW,
+                "background_slideshow_s": BACKGROUND_SLIDESHOW_S,
+            })
+            last_cfg_mtime = _cfg_mtime()
+            print(f"[background] saved mode={BACKGROUND_MODE} "
+                  f"colour={bg_color_name_of(BACKGROUND_COLOR)} "
+                  f"image={BACKGROUND_IMAGE or '(first)'} "
+                  f"slideshow={BACKGROUND_SLIDESHOW}/{BACKGROUND_SLIDESHOW_S}s")
+        except Exception as e:
+            print(f"[background] save failed: {e}")
+
+    def background_touch(lx: float, ly: float) -> None:
+        """Tap handler for the Background Picture screen (tap-only). Every
+        change previews live and persists immediately, like Other Settings."""
+        nonlocal menu_screen, bg_page, bg_slide_at, bg_slide_name
+        global BACKGROUND_MODE, BACKGROUND_COLOR, BACKGROUND_IMAGE
+        global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S
+        images = list_background_images()
+        rows, mode_rects, choices, slide, nav, back = _background_layout(
+            w, h, BACKGROUND_MODE, len(images), bg_page)
+        if back.collidepoint(lx, ly):
+            menu_screen = "main"
+            return
+        for value, r in mode_rects:
+            if r.collidepoint(lx, ly):
+                BACKGROUND_MODE = value
+                bg_slide_at = time.monotonic()
+                background_save()
+                return
+        if nav:
+            pages = max(1, (len(images) + BG_TILES_PER_PAGE - 1)
+                        // BG_TILES_PER_PAGE)
+            if nav["prev"].collidepoint(lx, ly):
+                bg_page = (bg_page - 1) % pages
+                return
+            if nav["next"].collidepoint(lx, ly):
+                bg_page = (bg_page + 1) % pages
+                return
+        for value, r in choices:
+            if r.collidepoint(lx, ly):
+                if BACKGROUND_MODE == "solid":
+                    BACKGROUND_COLOR = BG_COLOR_BY_NAME[value]
+                else:
+                    # Show it at once (the render loop only re-derives this when
+                    # the current picture disappears), and restart the timer so
+                    # an explicit choice isn't cycled away a moment later.
+                    BACKGROUND_IMAGE = value
+                    bg_slide_name = value
+                    bg_slide_at = time.monotonic()
+                background_save()
+                return
+        if slide:
+            if slide["toggle"].collidepoint(lx, ly):
+                BACKGROUND_SLIDESHOW = not BACKGROUND_SLIDESHOW
+                bg_slide_at = time.monotonic()
+                background_save()
+                return
+            new = BACKGROUND_SLIDESHOW_S
+            if slide["minus"].collidepoint(lx, ly):
+                new = max(BACKGROUND_SLIDESHOW_MIN_S,
+                          BACKGROUND_SLIDESHOW_S - 15)
+            elif slide["plus"].collidepoint(lx, ly):
+                new = min(BACKGROUND_SLIDESHOW_MAX_S,
+                          BACKGROUND_SLIDESHOW_S + 15)
+            if new != BACKGROUND_SLIDESHOW_S:
+                BACKGROUND_SLIDESHOW_S = new
+                background_save()
+
     def other_touch(lx: float, ly: float) -> None:
         """Tap handler for the Other Settings screen (tap-only): flip a toggle
         or ± a stepper, persist it, or return to the main menu via Back."""
@@ -3443,7 +3888,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         """Dispatch a logical-coord touch to whichever menu screen is showing.
         Only the font panel cares about motion (slider drags); the others are
         tap-only. Bluetooth actions are async, so they're fired as tasks."""
-        nonlocal menu_screen, last_menu_tap
+        nonlocal menu_screen, last_menu_tap, bg_page
         # Debounce discrete taps so the FINGERDOWN + synthesized MOUSEBUTTONDOWN
         # pair counts once (drags pass through — they must stay responsive).
         if not motion:
@@ -3468,6 +3913,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     set_color_names["bottom"] = color_name_of(NEXT)
                     set_color_names["karaoke"] = color_name_of(KARAOKE_COLOR)
                     menu_screen = "font"
+                elif key == "background":
+                    bg_page = 0
+                    menu_screen = "background"
                 elif key == "bluetooth":
                     menu_screen = "bluetooth"
                     asyncio.create_task(bt.open_screen())
@@ -3518,6 +3966,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 menu_screen = "main"
         elif menu_screen == "other":
             other_touch(lx, ly)
+        elif menu_screen == "background":
+            if not motion:
+                background_touch(lx, ly)
 
     frame_interval = 1.0 / TARGET_FPS
     start_mono = time.monotonic()   # for the startup road-safety notice
@@ -3730,6 +4181,27 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                           f"bar={PROGRESS_BAR} dim={DIM_ENABLED} "
                           f"dots={INTRO_DOTS_MAX} fps={TARGET_FPS}")
 
+            # Which picture the backdrop shows. Settle on the configured one,
+            # then let the slideshow walk forward from there on its own timer.
+            # bg_slide_name is display-only state — the slideshow never writes
+            # BACKGROUND_IMAGE, so the user's pick survives it.
+            if BACKGROUND_MODE == "picture":
+                if now - bg_images_at >= 2.0:
+                    # Re-scan on a slow timer, not every frame — it's a
+                    # directory syscall, and it only needs to be fast enough
+                    # that a picture dropped into image/ shows up without a
+                    # restart.
+                    bg_images = list_background_images()
+                    bg_images_at = now
+                if bg_slide_name not in bg_images:
+                    bg_slide_name = _active_background_image()
+                    bg_slide_at = now
+                if (BACKGROUND_SLIDESHOW and len(bg_images) > 1
+                        and now - bg_slide_at >= BACKGROUND_SLIDESHOW_S):
+                    nxt = (bg_images.index(bg_slide_name) + 1) % len(bg_images)
+                    bg_slide_name = bg_images[nxt]
+                    bg_slide_at = now
+
             screen.fill(BG)
 
             safety_left = SAFETY_NOTICE_S - (time.monotonic() - start_mono)
@@ -3753,11 +4225,17 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 draw_bluetooth(screen, w, h, bt)
             elif menu_screen == "other":
                 draw_other(screen, w, h)
+            elif menu_screen == "background":
+                draw_background(screen, w, h, bg_page)
             elif menu_screen == "version":
                 draw_version(screen, w, h, bt, updater)
             elif menu_screen == "network":
                 draw_network(screen, w, h, net)
             else:
+                # Backdrop first — lyrics and the idle clock draw on top of it.
+                # Menus deliberately never get here: they keep the flat BG fill
+                # above, so their controls stay readable.
+                paint_lyric_background(screen, w, h, bg_slide_name)
                 # Night auto-dim × manual brightness, then max line width before
                 # shrink-to-fit (both honour live config changes).
                 bf = brightness_factor() * user_brightness
