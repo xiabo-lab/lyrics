@@ -3074,10 +3074,15 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
         by = srect.y + (srect.h - bh) // 2
         tw = int(ctrl_w * 0.22)
         toggle = pygame.Rect(ctrl_x, by, tw, bh)
-        btn = min(bh, int(ctrl_w * 0.10))
-        minus = pygame.Rect(ctrl_x + tw + gap * 2, by, btn, bh)
-        plus = pygame.Rect(w - margin_x - btn, by, btn, bh)
-        value = pygame.Rect(minus.right, by, plus.left - minus.right, bh)
+        # Keep −/value/+ grouped next to the toggle instead of spanning the
+        # control column: this panel is 1920px wide, so pinning + to the far
+        # edge would leave the two halves of one stepper ~1000px apart, reading
+        # as unrelated buttons.
+        btn = min(bh, max(44, int(ctrl_w * 0.07)))
+        val_w = max(90, int(ctrl_w * 0.10))
+        minus = pygame.Rect(ctrl_x + tw + gap * 3, by, btn, bh)
+        value = pygame.Rect(minus.right + gap, by, val_w, bh)
+        plus = pygame.Rect(value.right + gap, by, btn, bh)
         slide = {"toggle": toggle, "minus": minus, "plus": plus, "value": value}
 
     margin_b = max(20, int(w * 0.12))
