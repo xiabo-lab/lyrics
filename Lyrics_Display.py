@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.4"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -2836,10 +2836,15 @@ def draw_other(screen, w, h) -> None:
 
 # Settings panel rows, in top-to-bottom display order. Each is
 # (key, human label). The key indexes into the live font/colour globals.
+# (key, label, sized). sized=False means the row is colour-only: no size slider
+# and no Bold toggle, because it borrows another row's font. The karaoke fill is
+# drawn in the CURRENT line's font/size/bold — only its colour is its own — so
+# offering it a size or weight of its own would be a lie.
 SETTINGS_ROWS = (
-    ("top", "Top line"),
-    ("current", "Current line"),
-    ("bottom", "Bottom line"),
+    ("top", "Top line", True),
+    ("current", "Current line", True),
+    ("bottom", "Bottom line", True),
+    ("karaoke", "Karaoke fill (sung words)", False),
 )
 
 
@@ -2853,6 +2858,9 @@ def _settings_layout(w: int, h: int):
       swatches = {key: [(name, rgb, Rect), ...]}   — six colour squares
       bolds    = {key: Rect}                        — the Bold/Normal toggle
       done     = Rect                              — the Done/save button
+
+    Colour-only rows (sized=False) appear in `swatches` but NOT in `sliders` or
+    `bolds`, so settings_touch simply never finds a slider/bold to hit for them.
     """
     margin_x = max(20, int(w * 0.08))
     content_w = w - 2 * margin_x
@@ -2860,7 +2868,18 @@ def _settings_layout(w: int, h: int):
     done_h = max(48, int(h * 0.11))
     bottom_pad = int(h * 0.03)
     avail = h - top - done_h - bottom_pad
-    sec_h = max(60, avail // len(SETTINGS_ROWS))
+    # A colour-only row carries just a label + swatches, so it needs less height
+    # than a row with a slider and a Bold button. Weight the split rather than
+    # dividing evenly, so adding it doesn't squeeze the sized rows.
+    weights = [1.0 if sized else 0.7 for _k, _l, sized in SETTINGS_ROWS]
+    unit = avail / sum(weights)
+    row_heights = [max(48, int(unit * wgt)) for wgt in weights]
+    if sum(row_heights) > avail:
+        # Screen too short for the per-row floor — honouring it would push Done
+        # off the bottom edge, so drop the floor and split strictly by weight.
+        row_heights = [int(avail * wgt / sum(weights)) for wgt in weights]
+    # Swatch size keys off a FULL row, so every row's palette matches.
+    sec_h = row_heights[0]
 
     # Each section is split horizontally: the LEFT 3/5 holds the size slider +
     # colour swatches, the RIGHT 2/5 is a big Bold/Normal button. Keeping them
@@ -2874,23 +2893,27 @@ def _settings_layout(w: int, h: int):
     gap = (left_w - 6 * sw) // 5 if left_w > 6 * sw else 6
 
     sliders, swatches, bolds = {}, {}, {}
-    for i, (key, _label) in enumerate(SETTINGS_ROWS):
-        sec_y = top + i * sec_h
-        slider_y = sec_y + int(sec_h * 0.34)
-        slider_h = max(10, int(sec_h * 0.09))
-        sliders[key] = pygame.Rect(margin_x, slider_y, left_w, slider_h)
-        sw_y = sec_y + int(sec_h * 0.58)
+    sec_y = top
+    for (key, _label, sized), row_h in zip(SETTINGS_ROWS, row_heights):
+        if sized:
+            slider_y = sec_y + int(row_h * 0.34)
+            slider_h = max(10, int(row_h * 0.09))
+            sliders[key] = pygame.Rect(margin_x, slider_y, left_w, slider_h)
+            sw_y = sec_y + int(row_h * 0.58)
+            # Big Bold/Normal button filling the right column.
+            bolds[key] = pygame.Rect(right_x, sec_y + int(row_h * 0.12),
+                                     right_w, int(row_h * 0.68))
+        else:
+            # No slider/bold to clear — sit the swatches just under the label.
+            sw_y = sec_y + int(row_h * 0.40)
         rects = []
         for j, (name, rgb) in enumerate(SETTING_COLORS):
             x = margin_x + j * (sw + gap)
             rects.append((name, rgb, pygame.Rect(x, sw_y, sw, sw)))
         swatches[key] = rects
-        # Big Bold/Normal button filling the right column.
-        bolds[key] = pygame.Rect(right_x, sec_y + int(sec_h * 0.12),
-                                 right_w, int(sec_h * 0.68))
+        sec_y += row_h
     done_w = max(140, int(w * 0.30))
-    done = pygame.Rect(w // 2 - done_w // 2, top + len(SETTINGS_ROWS) * sec_h,
-                       done_w, done_h)
+    done = pygame.Rect(w // 2 - done_w // 2, sec_y, done_w, done_h)
     return sliders, swatches, bolds, done
 
 
@@ -2903,33 +2926,43 @@ def draw_settings(screen, w, h, sizes: dict, names: dict, bolds: dict) -> None:
     screen.fill(BG)
     sliders, swatches, bold_rects, done = _settings_layout(w, h)
     label_font = get_font(max(20, min(40, h // 22)), True)
-    for key, label in SETTINGS_ROWS:
-        rect = sliders[key]
-        size = sizes[key]
-        lbl = label_font.render(f"{label} — {size}px", True, (235, 235, 235))
-        screen.blit(lbl, (rect.x, rect.y - lbl.get_height() - 8))
-        # Big Bold/Normal toggle on the right: filled blue when bold, dim grey
-        # when normal. Font scales with the button so it reads at a glance.
-        brect = bold_rects[key]
-        is_bold = bolds.get(key, False)
-        pygame.draw.rect(screen, (40, 90, 140) if is_bold else (60, 60, 68),
-                         brect, border_radius=12)
-        bold_font = get_font(max(18, min(48, brect.height // 2)), True)
-        bsurf = bold_font.render("Bold" if is_bold else "Normal", True,
-                                 (255, 255, 255) if is_bold else (205, 205, 205))
-        screen.blit(bsurf, bsurf.get_rect(center=brect.center))
-        # Slider track + filled portion + knob.
-        radius = max(2, rect.h // 2)
-        pygame.draw.rect(screen, (70, 70, 70), rect, border_radius=radius)
-        frac = (size - SETTINGS_FONT_MIN) / (SETTINGS_FONT_MAX - SETTINGS_FONT_MIN)
-        frac = min(1.0, max(0.0, frac))
-        fill_w = int(rect.w * frac)
-        if fill_w > 0:
-            pygame.draw.rect(screen, (255, 220, 120),
-                             (rect.x, rect.y, fill_w, rect.h), border_radius=radius)
-        knob_r = max(rect.h, 16)
-        pygame.draw.circle(screen, (255, 255, 255),
-                           (rect.x + fill_w, rect.centery), knob_r)
+    for key, label, sized in SETTINGS_ROWS:
+        if sized:
+            rect = sliders[key]
+            size = sizes[key]
+            lbl = label_font.render(f"{label} — {size}px", True, (235, 235, 235))
+            screen.blit(lbl, (rect.x, rect.y - lbl.get_height() - 8))
+            # Big Bold/Normal toggle on the right: filled blue when bold, dim
+            # grey when normal. Font scales with the button so it reads at a
+            # glance.
+            brect = bold_rects[key]
+            is_bold = bolds.get(key, False)
+            pygame.draw.rect(screen, (40, 90, 140) if is_bold else (60, 60, 68),
+                             brect, border_radius=12)
+            bold_font = get_font(max(18, min(48, brect.height // 2)), True)
+            bsurf = bold_font.render("Bold" if is_bold else "Normal", True,
+                                     (255, 255, 255) if is_bold else (205, 205, 205))
+            screen.blit(bsurf, bsurf.get_rect(center=brect.center))
+            # Slider track + filled portion + knob.
+            radius = max(2, rect.h // 2)
+            pygame.draw.rect(screen, (70, 70, 70), rect, border_radius=radius)
+            frac = ((size - SETTINGS_FONT_MIN)
+                    / (SETTINGS_FONT_MAX - SETTINGS_FONT_MIN))
+            frac = min(1.0, max(0.0, frac))
+            fill_w = int(rect.w * frac)
+            if fill_w > 0:
+                pygame.draw.rect(screen, (255, 220, 120),
+                                 (rect.x, rect.y, fill_w, rect.h),
+                                 border_radius=radius)
+            knob_r = max(rect.h, 16)
+            pygame.draw.circle(screen, (255, 255, 255),
+                               (rect.x + fill_w, rect.centery), knob_r)
+        else:
+            # Colour-only row: label sits directly above its swatches, since it
+            # borrows the Current line's font/size/bold.
+            first = swatches[key][0][2]
+            lbl = label_font.render(label, True, (235, 235, 235))
+            screen.blit(lbl, (first.x, first.y - lbl.get_height() - 8))
         # Colour swatches; the selected one gets a white outline.
         for name, rgb, srect in swatches[key]:
             pygame.draw.rect(screen, rgb, srect, border_radius=8)
@@ -3066,7 +3099,8 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     # from the live colours each time the panel opens.
     set_color_names = {"current": color_name_of(CURRENT),
                        "top": color_name_of(PREV),
-                       "bottom": color_name_of(NEXT)}
+                       "bottom": color_name_of(NEXT),
+                       "karaoke": color_name_of(KARAOKE_COLOR)}
 
     def _logical_x(nx: float) -> float:
         """Normalized touch x (0..1) → logical pixel x, undoing FLIP_180 so a
@@ -3259,12 +3293,14 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 
     def _apply_settings_color(key: str, name: str) -> None:
         """Live-preview a colour swatch tap (no file write until Done)."""
-        global CURRENT, PREV, NEXT
+        global CURRENT, PREV, NEXT, KARAOKE_COLOR
         rgb = COLOR_BY_NAME[name]
         if key == "current":
             CURRENT = rgb
         elif key == "top":
             PREV = rgb
+        elif key == "karaoke":
+            KARAOKE_COLOR = rgb
         else:
             NEXT = rgb
         set_color_names[key] = name
@@ -3303,6 +3339,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 "current_color": set_color_names["current"],
                 "top_color": set_color_names["top"],
                 "bottom_color": set_color_names["bottom"],
+                "karaoke_color": set_color_names["karaoke"],
                 "current_bold": CURRENT_BOLD,
                 "top_bold": TOP_BOLD,
                 "bottom_bold": BOTTOM_BOLD,
@@ -3311,6 +3348,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             print(f"[settings] saved fonts={FONT_CURRENT}/{FONT_TOP}/{FONT_BOTTOM}"
                   f" colours={set_color_names['current']}/{set_color_names['top']}"
                   f"/{set_color_names['bottom']}"
+                  f" karaoke={set_color_names['karaoke']}"
                   f" bold={TOP_BOLD}/{CURRENT_BOLD}/{BOTTOM_BOLD}")
         except Exception as e:
             print(f"[settings] save failed: {e}")
@@ -3428,6 +3466,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     set_color_names["current"] = color_name_of(CURRENT)
                     set_color_names["top"] = color_name_of(PREV)
                     set_color_names["bottom"] = color_name_of(NEXT)
+                    set_color_names["karaoke"] = color_name_of(KARAOKE_COLOR)
                     menu_screen = "font"
                 elif key == "bluetooth":
                     menu_screen = "bluetooth"
