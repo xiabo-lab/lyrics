@@ -84,9 +84,8 @@ UPDATE_FILES = (
     "wifi.sh", "carlyric-claude.sudoers", "README.md", "LICENSE", ".gitignore",
     # Pinyin IME data table + its generator (Modify Search → 中 mode).
     "pinyin_table.json", "build_pinyin_table.py",
-    # Idle-clock fonts: kept top-level (no subdir) so the OTA apply loop copies
-    # them even on older installs.
-    "Aldrich-Regular.ttc", "advanced_led_board-7.ttc",
+    # Idle-clock fonts live in Font/ (the apply loop mkdirs parents).
+    "Font/Aldrich-Regular.ttc", "Font/advanced_led_board-7.ttc",
     # Picker source-badge icons live in Assets/ (the apply loop mkdirs parents).
     "Assets/qq music icon.jpg", "Assets/kugou icon.jpg",
     "Assets/netease icon.png", "Assets/lrclib icon.png",
@@ -161,10 +160,10 @@ ROTATION_DEG = 0   # 0 for test monitor; 90 once the bar LCD is mounted.
 FLIP_180 = True    # monitor mounted upside-down: turn the whole frame 180°.
 FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 # Square geometric face (Google "Aldrich") used ONLY for the idle clock's big
-# time readout. Bundled at the repo root (from the xiabo-lab/pi_dashboard repo)
-# — kept top-level so OTA can ship it. get_font falls back to FONT_PATH if it's
-# missing. Alt LED face `advanced_led_board-7.ttc` also ships alongside.
-CLOCK_FONT_PATH = str(INSTALL_DIR / "Aldrich-Regular.ttc")
+# time readout. Bundled in Font/ (from the xiabo-lab/pi_dashboard repo) so OTA
+# can ship it. get_font falls back to FONT_PATH if it's missing. Alt LED face
+# `Font/advanced_led_board-7.ttc` also ships alongside.
+CLOCK_FONT_PATH = str(INSTALL_DIR / "Font" / "Aldrich-Regular.ttc")
 FONT_CURRENT = 56   # current/now line (and intro line)
 FONT_TOP = 34       # top context line (previous lyric)
 FONT_BOTTOM = 34    # bottom context line (next lyric)

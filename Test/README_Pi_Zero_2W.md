@@ -86,7 +86,7 @@ that keeps your eyes on the road.
 | `lrclib.py` | LRCLIB client + the `.lrc` parser (`parse_lrc`, handles enhanced/word-level LRC) and `LyricLine`/`Word` types. |
 | `qqcrypto.py` | Pure-Python decryptor for QQ's word-by-word QRC lyrics (QQ's "buggy DES"). |
 | `config.json` | Live, hot-reloaded tuning (offsets, fonts, colours, brightness, …). |
-| `Aldrich-Regular.ttc` / `advanced_led_board-7.ttc` | Idle-clock fonts (square Aldrich in use; LED alt bundled). Missing → the clock falls back to Noto. |
+| `Font/Aldrich-Regular.ttc` / `Font/advanced_led_board-7.ttc` | Idle-clock fonts (square Aldrich in use; LED alt bundled). Missing → the clock falls back to Noto. |
 | `*icon.png` / `*icon.jpg` | Per-source badges (QQ / Kugou / NetEase / LRCLIB) shown on picker results. |
 | `pinyin_table.json` | Offline pinyin→Hanzi table for the Modify Search IME. |
 | `bt-agent.service` | systemd unit for the headless Bluetooth pairing agent. |
