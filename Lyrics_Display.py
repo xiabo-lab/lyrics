@@ -67,7 +67,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.10.0"
+APP_VERSION = "1.11.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -1374,6 +1374,45 @@ class BluetoothAdmin:
         except Exception as e:
             print(f"[bt] forget error: {e}")
         await self.refresh_paired()
+
+
+def migrate_layout() -> None:
+    """Relocate the pre-1.11 file layout into the current folders, run once at
+    startup. Needed for OTA: the *old* build's updater fetches the old paths, so
+    after it installs the new code the badge icons, clock fonts and background
+    pictures are still at the repo root / in image/. This MOVES them into
+    Assets/, Font/ and Wallpaper/ so the new code finds them — in a single OTA
+    hop, without re-downloading. MOVES (never deletes uniques), so a user's own
+    dropped-in background pictures survive the image/ -> Wallpaper/ rename.
+    Idempotent and cheap once done (guarded by exists() checks); best-effort."""
+    def relocate(src: Path, dst: Path) -> None:
+        if not src.exists():
+            return
+        if dst.exists():
+            src.unlink()                 # new copy already in place → drop stale
+        else:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+    try:
+        # image/ -> Wallpaper/ (folder rename; keeps user-dropped pictures)
+        old_img = INSTALL_DIR / "image"
+        if old_img.is_dir():
+            for p in list(old_img.iterdir()):
+                if p.is_file():
+                    relocate(p, WALLPAPER_DIR / p.name)
+            try:
+                old_img.rmdir()          # remove image/ once emptied
+            except OSError:
+                pass
+            print("[migrate] image/ -> Wallpaper/")
+        # root-level icons -> Assets/, fonts -> Font/
+        for name in ("qq music icon.jpg", "kugou icon.jpg",
+                     "netease icon.png", "lrclib icon.png"):
+            relocate(INSTALL_DIR / name, INSTALL_DIR / "Assets" / name)
+        for name in ("Aldrich-Regular.ttc", "advanced_led_board-7.ttc"):
+            relocate(INSTALL_DIR / name, INSTALL_DIR / "Font" / name)
+    except Exception as e:
+        print(f"[migrate] skipped: {e}")
 
 
 class FirmwareUpdater:
@@ -4588,6 +4627,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
 
 
 async def main() -> None:
+    migrate_layout()      # OTA: settle any pre-1.11 file layout before we load
     apply_config()
     print(f"[config] lead={LEAD_OFFSET_MS}ms latency={LATENCY_OFFSET_MS}ms "
           f"fonts={FONT_CURRENT}/{FONT_TOP}/{FONT_BOTTOM} "
