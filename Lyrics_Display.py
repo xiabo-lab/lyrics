@@ -90,12 +90,13 @@ UPDATE_FILES = (
     "Assets/qq music icon.jpg", "Assets/kugou icon.jpg",
     "Assets/netease icon.png", "Assets/lrclib icon.png",
     # Stock backdrops for Settings → Background Picture. Subdir entries are fine
-    # (the apply loop mkdirs parents). A user's own pictures dropped into image/
+    # (the apply loop mkdirs parents). A user's own pictures dropped into Wallpaper/
     # are left alone — OTA only overwrites these names.
-    "image/Sample 1.jpg", "image/Sample 2.jpg", "image/Sample 3.jpg",
-    "image/Sample 4.png", "image/Sample 5.png", "image/Sample 6.jpg",
-    "image/Sample 7.jpg", "image/Sample 8.jpg", "image/Sample 9.jpg",
-    "image/Sample 10.png",
+    "Wallpaper/Sample 1.jpg", "Wallpaper/Sample 2.jpg", "Wallpaper/Sample 3.jpg",
+    "Wallpaper/Sample 4.png", "Wallpaper/Sample 5.png", "Wallpaper/Sample 6.jpg",
+    "Wallpaper/Sample 7.jpg", "Wallpaper/Sample 8.jpg", "Wallpaper/Sample 9.jpg",
+    "Wallpaper/Sample 10.png", "Wallpaper/Sample 11.png", "Wallpaper/Sample 12.png",
+    "Wallpaper/Sample 13.png",
 )
 UPDATE_SERVICE = "carlyric.service"   # restarted to load the new code
 # AVRCP "A/V Remote Control" profile. We connect THIS explicitly (not a
@@ -109,12 +110,12 @@ AVRCP_UUID = "0000110e-0000-1000-8000-00805f9b34fb"
 BG = (0, 0, 0)   # menus/picker/panels always paint on this, so controls read
 # Backdrop of the LYRIC screen (and the idle clock) only — never the menus, so
 # a photo can't make the settings controls unreadable. Either a flat colour or
-# a picture from image/. Live values come from background_* in config.json,
+# a picture from Wallpaper/. Live values come from background_* in config.json,
 # editable on-screen via Settings → Background Picture.
 BACKGROUND_MODE = "solid"          # "solid" | "picture"
 BACKGROUND_COLOR = (0, 0, 0)       # one of BG_SOLID_COLORS (solid mode)
-BACKGROUND_IMAGE = ""              # filename inside image/; "" = first found
-BACKGROUND_SLIDESHOW = False       # picture mode: cycle through image/
+BACKGROUND_IMAGE = ""              # filename inside Wallpaper/; "" = first found
+BACKGROUND_SLIDESHOW = False       # picture mode: cycle through Wallpaper/
 # Seconds per picture. Stepped in whole half-hours: a backdrop is scenery, not
 # something to watch change, so the useful range is "occasionally" not "often".
 BACKGROUND_SLIDESHOW_S = 1800      # 30 min
@@ -141,8 +142,8 @@ BG_COLOR_BY_NAME = {name.lower(): rgb for name, rgb in BG_SOLID_COLORS}
 # Display labels, keyed by the lowercase config value: "light brown" must read
 # back as "Light Brown", which str.capitalize() would mangle to "Light brown".
 BG_COLOR_LABELS = {name.lower(): name for name, _rgb in BG_SOLID_COLORS}
-# Pictures live here, so a user can drop their own in beside the shipped three.
-IMAGE_DIR = INSTALL_DIR / "image"
+# Pictures live here, so a user can drop their own in beside the shipped samples.
+WALLPAPER_DIR = INSTALL_DIR / "Wallpaper"
 BG_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
 # Driving legibility: a strong size + brightness gap between the "now" line
 # and its neighbours lets your eye lock onto the current line at a glance.
@@ -317,7 +318,7 @@ _ENUM_KEYS = {
     "background_color": set(BG_COLOR_BY_NAME),
 }
 # Free-form strings (a filename we can't validate here — the picture may be
-# added to image/ later, and a missing one falls back to the solid colour).
+# added to Wallpaper/ later, and a missing one falls back to the solid colour).
 _FREE_STRING_KEYS = {"background_image"}
 
 
@@ -468,7 +469,7 @@ def bg_color_name_of(rgb) -> str:
 
 
 def _active_background_image() -> str:
-    """The picture to show: the configured one, else the first in image/.
+    """The picture to show: the configured one, else the first in Wallpaper/.
 
     Falling back to the first means picking "Picture" mode does something
     sensible before a file has ever been chosen, and that a configured picture
@@ -489,13 +490,13 @@ def _natural_key(name: str):
 
 
 def list_background_images() -> list[str]:
-    """Filenames of the pictures in image/, in natural (1, 2, … 10) order.
+    """Filenames of the pictures in Wallpaper/, in natural (1, 2, … 10) order.
 
     Read fresh (not cached) so dropping a picture into the folder shows up in
     the picker without a restart. A missing/unreadable folder is not an error —
     the background just falls back to a solid colour."""
     try:
-        return sorted((p.name for p in IMAGE_DIR.iterdir()
+        return sorted((p.name for p in WALLPAPER_DIR.iterdir()
                        if p.is_file() and p.suffix.lower() in BG_IMAGE_EXTS),
                       key=_natural_key)
     except OSError:
@@ -526,7 +527,7 @@ def _scale_cover(surf, w: int, h: int):
 
 
 def background_surface(name: str, w: int, h: int):
-    """image/<name> scaled to cover w×h, or None if it can't be used.
+    """Wallpaper/<name> scaled to cover w×h, or None if it can't be used.
 
     Failures (missing file, corrupt image) are cached as None so a broken
     picture costs one log line, not a decode attempt every frame."""
@@ -536,7 +537,7 @@ def background_surface(name: str, w: int, h: int):
     surf = None
     if name:
         try:
-            raw = pygame.image.load(str(IMAGE_DIR / name)).convert()
+            raw = pygame.image.load(str(WALLPAPER_DIR / name)).convert()
             surf = _scale_cover(raw, w, h)
         except Exception as e:
             print(f"[background] cannot load {name}: {e}")
@@ -561,7 +562,7 @@ def paint_lyric_background(screen, w: int, h: int, name: str,
     that, BACKGROUND_DIM darkens the picture alone, to buy contrast on a bright
     or busy one without touching the text colours.
 
-    Anything that stops the picture working — mode is solid, image/ is empty,
+    Anything that stops the picture working — mode is solid, Wallpaper/ is empty,
     the file vanished — lands on the solid colour rather than a black void."""
     if BACKGROUND_MODE == "picture":
         surf = background_surface(name, w, h)
@@ -3283,7 +3284,7 @@ def draw_background(screen, w, h, page: int) -> None:
         _label(rows["choice"], "Picture")
         if not choices:
             s = note_font.render(
-                f"No pictures in image/ — copy {w} x {h} images there.",
+                f"No pictures in Wallpaper/ — copy {w} x {h} images there.",
                 True, (255, 170, 90))
             screen.blit(s, (rows["choice"].x + int(w * 0.17),
                             rows["choice"].centery - s.get_height() // 2))
@@ -3647,7 +3648,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     bg_slide_at = time.monotonic()
     bg_slide_name = ""
     bg_images: list[str] = []
-    bg_images_at = 0.0     # last image/ scan; 0.0 forces one on the first frame
+    bg_images_at = 0.0     # last Wallpaper/ scan; 0.0 forces one on the first frame
 
     def _logical_x(nx: float) -> float:
         """Normalized touch x (0..1) → logical pixel x, undoing FLIP_180 so a
@@ -4381,7 +4382,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 if now - bg_images_at >= 2.0:
                     # Re-scan on a slow timer, not every frame — it's a
                     # directory syscall, and it only needs to be fast enough
-                    # that a picture dropped into image/ shows up without a
+                    # that a picture dropped into Wallpaper/ shows up without a
                     # restart.
                     bg_images = list_background_images()
                     bg_images_at = now

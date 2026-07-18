@@ -17,9 +17,9 @@ seconds to open Settings. Nothing needs a keyboard or a config file.
   lines, plus the karaoke fill colour. Eight colours, including Black and Brown
   for use over a light backdrop.
 - **Background Picture** — the lyric screen's backdrop is either a solid colour
-  (Black, White, Grey, Light Brown, Sky Blue) or a picture from `image/`, with
+  (Black, White, Grey, Light Brown, Sky Blue) or a picture from `Wallpaper/`, with
   an optional slideshow (30 min – 4 h) and a **Dim picture** control for busy
-  or bright pictures. Drop your own images into `image/` and they appear in the
+  or bright pictures. Drop your own images into `Wallpaper/` and they appear in the
   picker without a restart — no update overwrites them.
   > Pictures are scaled to **fill** the panel and centre-cropped, so match your
   > panel's aspect ratio (the screen tells you its exact size) or the top and

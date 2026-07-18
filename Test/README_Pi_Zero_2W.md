@@ -98,7 +98,7 @@ that keeps your eyes on the road.
 | `test_lyrics.py` | Unit tests for the pure logic (lrc parsing, lock policy, line indexing). |
 | `Assets/` | Picker source-badge icons. |
 | `Font/` | Idle-clock fonts (shipped via the OTA sync list). |
-| `image/` | Background pictures for Settings → Background Picture; drop your own here (bundled `Sample 1–10`, live-scanned at runtime). |
+| `Wallpaper/` | Background pictures for Settings → Background Picture; drop your own here (bundled `Sample 1–13`, live-scanned at runtime). |
 | `Example/` | Sample photos of the display, for the docs. |
 | `Bill of Material/` | Parts list for building the display (BoM spreadsheet). |
 | `Test/` | Archived setup guides (Pi 5 full-desktop, Pi Zero 2W, the overview README) plus scratch/manual test scripts from development (display, touch, AVRCP probes). |
