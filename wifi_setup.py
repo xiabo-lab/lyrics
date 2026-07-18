@@ -9,6 +9,11 @@ service runs as root, so nmcli needs no sudo.
 
 The UI is a small state machine:
     SCANNING -> LIST -> PASSWORD -> CONNECTING -> RESULT
+NetworkManager saves each network's password on a successful connect and
+auto-reconnects on boot, so a network with a stored profile (marked "saved" in
+the list) connects with ONE tap — LIST -> CONNECTING, skipping PASSWORD. Its
+Edit button (and the "Change password" button on a failed connect) reopens
+PASSWORD to overwrite the stored password when the router's changes.
 It is drawn in LOGICAL (pre-FLIP_180) space and hit-tested in the same space,
 exactly like draw_network / the other menus, so taps line up after the frame is
 flipped. All blocking nmcli work runs in daemon threads; the render loop just
@@ -101,6 +106,38 @@ def current_ssid():
     return None
 
 
+def saved_ssids():
+    """Set of SSIDs that already have a saved NetworkManager Wi-Fi profile.
+
+    A saved profile means NM stored the password and will auto-reconnect, so the
+    UI can connect these with one tap instead of asking for the password again.
+    Matches on the profile's actual 802-11-wireless.ssid field (profiles are
+    often not named after the SSID), mirroring _delete_profiles_for_ssid."""
+    found = set()
+    try:
+        out = subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE", "con", "show"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return found
+    for line in out.splitlines():
+        parts = _split_terse(line)
+        if len(parts) < 2 or parts[1] != "802-11-wireless":
+            continue
+        name = parts[0]
+        try:
+            info = subprocess.run(
+                ["nmcli", "-t", "-f", "802-11-wireless.ssid", "con", "show", name],
+                capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            continue
+        ip = _split_terse(info)                 # ['802-11-wireless.ssid', '<ssid>']
+        if len(ip) >= 2 and ip[1]:
+            found.add(ip[1])
+        elif name:
+            found.add(name)                      # profile named after the SSID
+    return found
+
+
 def _delete_profiles_for_ssid(ssid):
     """Delete every saved connection bound to this SSID, whatever its name.
 
@@ -133,15 +170,8 @@ def _delete_profiles_for_ssid(ssid):
                            capture_output=True, timeout=10)
 
 
-def connect(ssid, password, secure):
-    """Blocking nmcli connect. Returns (ok, message)."""
-    # Clear any stale profile for this SSID first so we always build a fresh,
-    # complete one. (The other saved networks remain, so this can't strand the
-    # Pi offline if the new password is wrong.)
-    _delete_profiles_for_ssid(ssid)
-    cmd = ["nmcli", "dev", "wifi", "connect", ssid]
-    if secure and password:
-        cmd += ["password", password]
+def _run_connect(cmd):
+    """Run an nmcli connect command, returning (ok, message)."""
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
     except subprocess.TimeoutExpired:
@@ -151,6 +181,30 @@ def connect(ssid, password, secure):
     err = (r.stderr or r.stdout or "Failed").strip().splitlines()
     msg = err[-1] if err else "Failed"
     return False, msg.replace("Error: ", "")[:60]
+
+
+def connect_saved(ssid):
+    """Connect using the network's already-saved profile — no password needed.
+
+    `nmcli dev wifi connect <ssid>` (no password) reuses the stored secrets when
+    a profile exists. Used for one-tap reconnect. If it fails (e.g. the router's
+    password was changed) the caller offers the password screen."""
+    return _run_connect(["nmcli", "dev", "wifi", "connect", ssid])
+
+
+def connect(ssid, password, secure):
+    """Blocking nmcli connect with a (new/changed) password. Returns (ok, msg).
+
+    On success NM SAVES the SSID+password as a profile and auto-reconnects on
+    boot, so next time the network connects with one tap (see connect_saved).
+    We clear any stale profile for this SSID first so we always build a fresh,
+    complete one — this is also the path for EDITING a changed password. (The
+    other saved networks remain, so a wrong new password can't strand the Pi.)"""
+    _delete_profiles_for_ssid(ssid)
+    cmd = ["nmcli", "dev", "wifi", "connect", ssid]
+    if secure and password:
+        cmd += ["password", password]
+    return _run_connect(cmd)
 
 
 # --- keyboard layout ---------------------------------------------------------
@@ -191,25 +245,32 @@ class WifiSetup:
     # --- background work ---
     def _scan_thread(self, rescan):
         nets = scan_networks(rescan)
+        saved = saved_ssids()
         cur = current_ssid()
+        for n in nets:
+            n["saved"] = n["ssid"] in saved     # has stored creds → one-tap
         with self._lock:
             self.networks = nets
             self.current = cur
             if self.state == SCANNING:
                 self.state = LIST
 
-    def _connect_thread(self):
-        ok, msg = connect(self.selected["ssid"], self.password,
-                          self.selected["secure"])
+    def _connect_thread(self, use_saved):
+        ssid = self.selected["ssid"]
+        if use_saved:
+            ok, msg = connect_saved(ssid)
+        else:
+            ok, msg = connect(ssid, self.password, self.selected["secure"])
         cur = current_ssid()
         with self._lock:
             self.result_ok, self.result_msg = ok, msg
             self.current = cur
             self.state = RESULT
 
-    def _begin_connect(self):
+    def _begin_connect(self, use_saved=False):
         self.state = CONNECTING
-        threading.Thread(target=self._connect_thread, daemon=True).start()
+        threading.Thread(target=self._connect_thread, args=(use_saved,),
+                         daemon=True).start()
 
     # --- input ---
     def handle_tap(self, x, y):
@@ -232,21 +293,35 @@ class WifiSetup:
         if action.startswith("ssid:"):
             idx = int(action[5:])
             if 0 <= idx < len(self.networks):
-                self.selected = self.networks[idx]
-                if self.selected["secure"]:
-                    self.password, self.shift, self.symbols = "", False, False
-                    self.state = PASSWORD
+                net = self.networks[idx]
+                self.selected = net
+                if not net["secure"]:
+                    self._begin_connect()               # open network
+                elif net.get("saved"):
+                    self._begin_connect(use_saved=True)  # stored creds → one tap
                 else:
-                    self._begin_connect()
+                    self._open_password()                # first time → ask
+            return None
+        if action.startswith("edit:"):
+            # Change the saved password for a known network (router changed it).
+            idx = int(action[5:])
+            if 0 <= idx < len(self.networks):
+                self.selected = self.networks[idx]
+                self._open_password()
             return None
         if self.state == PASSWORD:
             return self._password_key(action)
         if self.state == RESULT:
             if action in ("ok", "done"):
                 return "back" if self.result_ok else None
-            if action == "retry":
-                self.state = PASSWORD
+            if action == "changepw":                     # failed → enter new pw
+                self._open_password()
         return None
+
+    def _open_password(self):
+        """Go to the password screen for self.selected with a cleared buffer."""
+        self.password, self.shift, self.symbols = "", False, False
+        self.state = PASSWORD
 
     def _password_key(self, action):
         if action == "back":
@@ -351,21 +426,33 @@ class WifiSetup:
         avail = by - gap - top
         maxrows = max(1, avail // (rowh + gap))
         small = int(rowh * 0.5)
+        ew = max(110, int(w * 0.10))                 # Edit-button width
         for i, net in enumerate(self.networks[:maxrows]):
             y0 = top + i * (rowh + gap)
             row = pygame.Rect(pad, y0, w - 2 * pad, rowh)
             pygame.draw.rect(screen, _SLATE, row, border_radius=8)
-            mark = "  • current" if net["ssid"] == self.current else ""
+            editable = net["secure"] and net.get("saved")
+            # Saved secured networks get an Edit button (change password); the
+            # rest of the row taps to connect. The row-tap hit stops before it.
+            if editable:
+                edit = pygame.Rect(row.right - ew - 6, y0 + 6, ew, rowh - 12)
+                self._button(screen, edit, "Edit", f"edit:{i}")
+                self._hits.append((row.x, row.y, edit.x - 6, row.bottom, f"ssid:{i}"))
+                right = edit.x - 12
+            else:
+                self._hits.append((row.x, row.y, row.right, row.bottom, f"ssid:{i}"))
+                right = row.right - 20
+            cur = net["ssid"] == self.current
+            mark = "  • current" if cur else ("  • saved" if net.get("saved") else "")
             self._text(screen, net["ssid"] + mark, small,
-                       _OK if net["ssid"] == self.current else _FG,
+                       _OK if cur else _FG,
                        topleft=(row.x + 16, row.centery - small // 2))
             sig = f"{net['signal']}%"
             sig_surf = self._font(int(rowh * 0.42)).render(sig, True, _MUTED)
-            sx = row.right - 20 - sig_surf.get_width()
+            sx = right - sig_surf.get_width()
             screen.blit(sig_surf, (sx, row.centery - sig_surf.get_height() // 2))
             if net["secure"]:
                 self._draw_lock(screen, sx - 22, row.centery, _MUTED)
-            self._hits.append((row.x, row.y, row.right, row.bottom, f"ssid:{i}"))
         if not self.networks:
             self._center(screen, "No networks found — tap Rescan")
 
@@ -439,8 +526,13 @@ class WifiSetup:
         if ok:
             self._button(screen, pygame.Rect(w // 2 - 130, by, 260, bh),
                          "Done", "done", "ok")
+        elif self.selected and self.selected.get("secure"):
+            # Failed on a secured network — usually a wrong/changed password, so
+            # offer to (re)enter it, plus Back.
+            self._button(screen, pygame.Rect(w // 2 - 330, by, 320, bh),
+                         "Change password", "changepw", "accent")
+            self._button(screen, pygame.Rect(w // 2 + 10, by, 220, bh),
+                         "Back", "cancel")
         else:
-            self._button(screen, pygame.Rect(w // 2 - 270, by, 250, bh),
-                         "Retry", "retry", "accent")
-            self._button(screen, pygame.Rect(w // 2 + 20, by, 250, bh),
+            self._button(screen, pygame.Rect(w // 2 - 130, by, 260, bh),
                          "Back", "cancel")
