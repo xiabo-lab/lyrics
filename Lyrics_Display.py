@@ -53,6 +53,7 @@ from lyric_sources import (
     search_candidates,
     set_alias,
 )
+from wifi_setup import WifiSetup
 
 # Silence pygame ALSA warnings — we don't need audio out.
 os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
@@ -67,7 +68,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.11.0"
+APP_VERSION = "1.12.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -80,6 +81,7 @@ UPDATE_URL = "https://github.com/xiabo-lab/lyrics/archive/refs/heads/main.tar.gz
 UPDATE_FILES = (
     "Lyrics_Display.py", "lyric_sources.py", "lrclib.py", "test_lyrics.py",
     "qqcrypto.py",   # QQ QRC (word-by-word) buggy-DES decryptor
+    "wifi_setup.py",   # on-screen Wi-Fi setup (Settings → Network → Wi-Fi Setup)
     "bt-agent.service", "99-carlyric-ignore-avrcp-pointer.rules",
     "wifi.sh", "carlyric-claude.sudoers", "README.md", "LICENSE", ".gitignore",
     # Pinyin IME data table + its generator (Modify Search → 中 mode).
@@ -3008,14 +3010,16 @@ def draw_version(screen, w, h, bt: "BluetoothAdmin",
 
 # ---- Network screen --------------------------------------------------------
 def _network_layout(w: int, h: int):
-    """Geometry for the Network screen: (check_btn, back_btn). Mirrors the
-    Version screen — two stacked full-width buttons with the info above."""
+    """Geometry for the Network screen: (setup_btn, check_btn, back_btn). Three
+    stacked full-width buttons with the info above."""
     margin_x = max(20, int(w * 0.12))
     bw = w - 2 * margin_x
     bh = int(h * 0.15)
-    back = pygame.Rect(margin_x, h - int(h * 0.19), bw, bh)
-    check = pygame.Rect(margin_x, back.y - bh - max(12, int(h * 0.04)), bw, bh)
-    return check, back
+    gap = max(8, int(h * 0.025))
+    back = pygame.Rect(margin_x, h - int(h * 0.18), bw, bh)
+    check = pygame.Rect(margin_x, back.y - bh - gap, bw, bh)
+    setup = pygame.Rect(margin_x, check.y - bh - gap, bw, bh)
+    return setup, check, back
 
 
 def draw_network(screen, w, h, net: "NetworkStatus") -> None:
@@ -3041,13 +3045,16 @@ def draw_network(screen, w, h, net: "NetworkStatus") -> None:
         small.render(f"IP address: {net.ip or '—'}", True, (150, 150, 150)),
         small.render(f"Internet: {net_txt}", True, net_col),
     ]
-    y = int(h * 0.10)
+    y = int(h * 0.08)
     for surf in lines:
         screen.blit(surf, surf.get_rect(midtop=(w // 2, y)))
-        y += surf.get_height() + 12
+        y += surf.get_height() + 8
 
-    check, back = _network_layout(w, h)
-    pygame.draw.rect(screen, (150, 110, 30) if net.busy else (40, 90, 140),
+    setup, check, back = _network_layout(w, h)
+    pygame.draw.rect(screen, (40, 90, 140), setup, border_radius=14)
+    s = btn_font.render("Wi-Fi Setup", True, (255, 255, 255))
+    screen.blit(s, s.get_rect(center=setup.center))
+    pygame.draw.rect(screen, (150, 110, 30) if net.busy else (45, 45, 58),
                      check, border_radius=14)
     c = btn_font.render("Checking…" if net.busy else "Check now",
                         True, (255, 255, 255))
@@ -3663,9 +3670,11 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     #   "bluetooth"  → pair a new phone / forget paired phones
     #   "other"      → misc toggles/steppers (flip, A2DP/lyric offset, auto-dim)
     #   "version"    → read-only build info
-    #   "network"    → read-only connectivity (SSID / IP / online) + Check now
+    #   "network"    → connectivity (SSID / IP / online) + Check now + Wi-Fi Setup
+    #                  (the Wi-Fi Setup overlay is the separate `wifi_ui` below)
     menu_screen: str | None = None
     net = NetworkStatus()        # connectivity for the Network screen
+    wifi_ui = None               # WifiSetup overlay (Network → Wi-Fi Setup), else None
     settings_armed = False       # ignore touches until the opening hold lifts
     # A touch fires BOTH a FINGERDOWN and a synthesized MOUSEBUTTONDOWN; without
     # debouncing, every menu tap is handled twice — harmless for sliders/swatches
@@ -4120,7 +4129,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
         """Dispatch a logical-coord touch to whichever menu screen is showing.
         Only the font panel cares about motion (slider drags); the others are
         tap-only. Bluetooth actions are async, so they're fired as tasks."""
-        nonlocal menu_screen, last_menu_tap, bg_page
+        nonlocal menu_screen, last_menu_tap, bg_page, wifi_ui
         # Debounce discrete taps so the FINGERDOWN + synthesized MOUSEBUTTONDOWN
         # pair counts once (drags pass through — they must stay responsive).
         if not motion:
@@ -4128,6 +4137,12 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             if now_t - last_menu_tap < 0.35:
                 return
             last_menu_tap = now_t
+        # The Wi-Fi Setup overlay (opened from the Network screen) owns the whole
+        # screen while up; route taps to it until it asks to close.
+        if wifi_ui is not None:
+            if not motion and wifi_ui.handle_tap(lx, ly) == "back":
+                wifi_ui = None
+            return
         if menu_screen == "font":
             settings_touch(lx, ly, motion)
             return
@@ -4155,6 +4170,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     menu_screen = "other"
                 elif key == "network":
                     menu_screen = "network"
+                    wifi_ui = None                       # fresh Network screen
                     asyncio.create_task(net.refresh())   # auto-check on open
                 elif key == "version":
                     updater.reset()
@@ -4190,7 +4206,10 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 updater.reset()
                 menu_screen = "main"
         elif menu_screen == "network":
-            check, back = _network_layout(w, h)
+            setup, check, back = _network_layout(w, h)
+            if setup.collidepoint(lx, ly):
+                wifi_ui = WifiSetup(w, h, get_font)   # open the Wi-Fi overlay
+                return
             if check.collidepoint(lx, ly):
                 asyncio.create_task(net.refresh())   # re-check on demand
                 return
@@ -4462,7 +4481,10 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             elif menu_screen == "version":
                 draw_version(screen, w, h, bt, updater)
             elif menu_screen == "network":
-                draw_network(screen, w, h, net)
+                if wifi_ui is not None:
+                    wifi_ui.draw(screen)
+                else:
+                    draw_network(screen, w, h, net)
             else:
                 # Night auto-dim × manual brightness, then max line width before
                 # shrink-to-fit (both honour live config changes).
