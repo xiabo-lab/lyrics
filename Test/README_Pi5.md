@@ -1,76 +1,87 @@
-# carlyrics on Raspberry Pi 5 — Raspberry Pi OS **Lite** (64-bit)
+# carlyrics on Raspberry Pi 5
 
-Step-by-step setup for the car lyric display on a **Raspberry Pi 5** running the
-**64-bit _Lite_ (console-only, no desktop)** image. Tested end-to-end on a **Pi 5
-1GB**; any Pi 5 (1/2/4/8 GB) works — the app is light and never decodes audio.
-**No source-code changes are required**; the code is identical to the Pi Zero 2W
-build.
+Step-by-step setup for running the car lyric display on a **Raspberry Pi 5**,
+**tested on an 8GB board running the full Raspberry Pi OS (64-bit, "with
+desktop")** switched to console boot. The application code is identical to the Pi
+Zero 2W build — **no source changes are required.** The only differences are the
+OS image you flash and a few physical details (HDMI port, power, cooling).
 
-> ⚠️ **Use the _Lite_ image, not "with desktop."** The desktop image auto-starts
-> its own Wayland compositor (`labwc` via `lightdm`), which grabs the HDMI output
-> and fights `cage`. You'll get an endless `Swapchain … failed test` and a black
-> screen. `cage` must be the **only** compositor. (Already on the desktop image?
-> See *Display gotchas → #1* below to switch to console without reflashing.)
+> **Running the Lite (console-only) image instead?** Follow the leaner
+> [the Lite guide](../README.md) — same result with fewer steps (there's
+> no desktop to switch off). This guide covers the full "with desktop" image.
 
-These instructions assume the Linux username **`fuwenxu`** and the install path
-**`~/carlyrics`**. If your username differs, read *If your username isn't
-`fuwenxu`* just below — **the one place it truly matters is the service
-`ExecStart` path in Part E.**
+These instructions assume the Linux user `fuwenxu` and the install path
+`~/carlyrics`, matching the rest of the project. If you use a different
+username, see *Changing the username* in [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) and adjust
+the paths below.
 
 > ### If your username isn't `fuwenxu`
 >
 > **The Python code needs no edits** — it resolves `config.json`, `cache/`, and
-> `rejections.json` relative to the script itself, so it runs from any path. Only
-> deployment paths change. Substituting `pi5` as an example:
+> `rejections.json` relative to the script itself
+> (`Path(__file__).resolve().parent`), so it runs from any path. The `fuwenxu`
+> strings inside the `.py` files are comments/example commands only.
+>
+> Only deployment details change. Substituting `pi5` as an example:
 >
 > | Where | Change | Required? |
 > |-------|--------|-----------|
-> | systemd unit `ExecStart` (Part E) | `/home/pi5/carlyrics/Lyrics_Display.py` | **Yes — a wrong/placeholder path is the #1 reason the service fails to start** |
+> | systemd unit `ExecStart` (Part E) | `/home/pi5/carlyrics/Lyrics_Display.py` | **Yes** — wrong path = service won't start |
 > | `carlyric-claude.sudoers` (Part D-3) | leading `fuwenxu` → `pi5` | Only if you use password-less restarts |
-> | clone path, `ssh`/`scp` host | your username + home dir | Yes (it's just where you log in / clone) |
+> | clone path / `ssh` & `scp` host below | use your username + home dir | Yes (it's just where you log in / clone) |
+> | `wifi.sh` hint, `.py` docstrings | cosmetic | No |
 >
-> Fix the repo files in one pass (from the repo root, after Part C):
+> Fix the repo files in one pass (run from the repo root on the Pi, after Part C):
 >
 > ```bash
 > grep -rl fuwenxu . | xargs sed -i 's/fuwenxu/pi5/g'
 > ```
 >
 > The systemd unit lives in `/etc/systemd/system/` (outside the repo), so set its
-> path **by hand** in Part E — do not leave any `<pi-user>` placeholder in it.
+> path by hand in Part E.
 
 ---
 
-## Hardware notes (Pi 5)
+## Hardware notes (Pi 5 vs. Pi Zero 2W)
 
-| Item | What to do |
-|------|------------|
+| Item | What to do on the Pi 5 |
+|------|------------------------|
 | **HDMI** | Plug the bar display into **HDMI0** — the micro-HDMI port **nearest the USB-C power** connector. Needs a micro-HDMI cable/adapter. |
-| **Power** | Use a **5V / 5A (25W) USB-C** supply. An under-sized car charger causes low-voltage throttling on the Pi 5 — size the car power accordingly. |
-| **Cooling** | Fit the **official active cooler** or a fan case. The Pi 5 runs hot and throttles in a warm car under sustained load. |
-| **RAM** | 1GB is enough (tested). More RAM gives no benefit for this app. |
-| **Audio** | No 3.5mm jack, and irrelevant here — the Pi is a Bluetooth A2DP *sink* and never decodes audio (`SDL_AUDIODRIVER=dummy`). |
-| **Bluetooth** | Onboard BT works the same as the Zero; pairing / `bt-agent` / AVRCP flow is unchanged. |
-| **RTC (optional)** | The Pi 5 has an RTC header. A coin cell keeps the clock correct before Wi-Fi/NTP — nice for the idle-clock display. |
+| **Power** | Use a **5V / 5A (25W) USB-C** supply. A car charger that ran the Zero will likely under-power the Pi 5 and cause low-voltage throttling — size the car power accordingly. |
+| **Cooling** | Fit the **official active cooler or a case with a fan**. The Pi 5 runs hot and will throttle in a warm car under sustained load. |
+| **Audio** | No 3.5mm jack on the Pi 5 — irrelevant here. The Pi is a Bluetooth A2DP *sink* feeding the car stereo and never decodes audio (`SDL_AUDIODRIVER=dummy`). No change needed. |
+| **Bluetooth** | Onboard BT works the same as the Zero; the pairing / `bt-agent` / AVRCP flow is unchanged. |
+| **RTC (optional)** | The Pi 5 has a real-time-clock header. A coin cell keeps the clock correct before Wi-Fi/NTP — nice for the idle-clock display. |
 
 ---
 
 ## Part A — Flash the OS
 
-**OS: Raspberry Pi OS (64-bit) — the _Lite_ image.** 64-bit is required on the
-Pi 5 (it uses the `vc4-kms-v3d` graphics stack `cage` needs).
+**OS: Raspberry Pi OS (64-bit).** This guide is tested with the **full "with
+desktop"** image on a Pi 5 (8GB). 64-bit is required on the Pi 5 (it uses the
+`vc4-kms-v3d` graphics stack that `cage` needs).
 
-1. Install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>) and
-   insert the microSD card.
+> ⚠️ **The desktop must not run at the same time as `cage`.** The desktop's
+> `labwc` Wayland compositor (auto-started by `lightdm`) grabs the HDMI output and
+> holds DRM master, so `cage` can never own the screen — you'd get an endless
+> `Swapchain for output 'HDMI-A-1' failed test` and a black display. `cage` must
+> be the *only* compositor, so **Step 7 below switches the Pi to boot to
+> console.** (Prefer to avoid this entirely? Use the Lite image and
+> [the Lite guide](../README.md).)
+
+1. Install **Raspberry Pi Imager** (<https://www.raspberrypi.com/software/>) on
+   your computer and insert the microSD card.
 2. In Imager:
    - **Device:** Raspberry Pi 5
-   - **OS:** Raspberry Pi OS (other) → **Raspberry Pi OS Lite (64-bit)**
+   - **OS:** Raspberry Pi OS (64-bit)  *(the standard "with desktop" image)*
    - **Storage:** your microSD card
-3. Click **Next → Edit Settings** and set:
+3. Click **Next → Edit Settings** (the OS customization dialog) and set:
    - **Hostname:** `carlyric` (so `carlyric.local` resolves on the network)
-   - **Username:** `fuwenxu` + a password (keep `fuwenxu` to match the paths)
+   - **Username:** `fuwenxu` + a password (keep `fuwenxu` to match the
+     project's paths)
    - **Wi-Fi:** your SSID, password, and country
    - **Services tab:** enable **SSH** (password authentication)
-4. **Write** the card, then insert it into the Pi 5.
+4. **Write** the card. When finished, insert it into the Pi 5.
 5. Connect the display to **HDMI0**, apply the **5A USB-C** power, and boot.
 6. After ~1 minute, SSH in from your computer:
 
@@ -78,7 +89,16 @@ Pi 5 (it uses the `vc4-kms-v3d` graphics stack `cage` needs).
    ssh fuwenxu@carlyric.local
    ```
 
-   If `.local` doesn't resolve, use the Pi's IP from your router.
+   If `.local` doesn't resolve, use the Pi's IP from your router instead.
+7. **Switch to console boot** so the desktop compositor never fights `cage`:
+
+   ```bash
+   sudo systemctl set-default multi-user.target
+   sudo reboot
+   ```
+
+   After the reboot the Pi comes up to a console (no desktop). SSH back in and
+   continue with Part B.
 
 ---
 
@@ -96,8 +116,9 @@ without a full desktop; `fonts-noto-cjk` provides Chinese glyphs. `uhubctl`
 lets the app power-cycle the USB 5G modem's port when connectivity drops (see
 **Auto-recovery** below) — optional, but recommended for in-car use.
 
-Enable `seatd` at boot (on Lite you must do this yourself, or `cage` fails with a
-`libseat`/seat error):
+Enable `seatd` so it starts at boot (on the desktop image the login manager
+pulled it in for you; on Lite/console you must enable it yourself, or `cage`
+fails with a `libseat`/seat error):
 
 ```bash
 sudo systemctl enable --now seatd
@@ -151,10 +172,7 @@ from systemd. Create the unit:
 sudo nano /etc/systemd/system/carlyric.service
 ```
 
-Paste this exactly. **The paths below are for user `fuwenxu`. If your username
-is different, replace `fuwenxu` in the `ExecStart` line — never leave a
-`<pi-user>` placeholder there, or the service loops with
-`can't open file '/home/<pi-user>/carlyrics/Lyrics_Display.py'`.**
+Paste exactly (paths already set for user `fuwenxu`):
 
 ```ini
 [Unit]
@@ -180,19 +198,21 @@ WantedBy=multi-user.target
 ```
 
 > **Why the `tty1` binding matters (Pi 5).** At boot the kernel framebuffer
-> console owns the HDMI output (DRM master). A plain background service can't take
-> it, so `cage` starts but never presents — you'd see `Could not make device fd
-> drm master: Device or resource busy` and endless `Swapchain … failed test`.
-> `Conflicts=getty@tty1.service` + `TTYPath=/dev/tty1` + `StandardInput=tty` +
-> `PAMName=login` make `cage` the **active VT session on `tty1`**, so the kernel
-> hands it DRM master cleanly. Don't add any `WLR_*` env vars — not needed here.
+> console owns the HDMI output (DRM master). A plain background service can't
+> take it, so `cage` starts but can never present — you'd see
+> `Could not make device fd drm master: Device or resource busy` and endless
+> `Swapchain … failed test`. `Conflicts=getty@tty1.service` + `TTYPath=/dev/tty1`
+> + `StandardInput=tty` + `PAMName=login` make `cage` the **active VT session on
+> `tty1`**, so the kernel hands it DRM master cleanly. Don't add any `WLR_*` env
+> vars — they're not needed and were a red herring on this hardware.
 
-> **`Restart=on-failure` + the `Esc` key.** With a keyboard attached, `Esc` exits
-> the kiosk cleanly and it stays stopped (a real crash still auto-recovers).
-> Manage the Pi over SSH — VT switching (`Ctrl+Alt+F2`) is blocked under cage on
-> this board. **Do not add `OnSuccess=getty@tty1.service`**: it also fires during
-> every `systemctl restart`, collides with the `tty1` hand-off, and breaks
-> "Update Firmware" / manual restarts.
+> **`Restart=on-failure` + the `Esc` key.** With a keyboard attached, `Esc`
+> exits the kiosk cleanly; `Restart=on-failure` then leaves it stopped (a real
+> crash still auto-recovers). Manage the Pi over SSH from there — VT switching
+> (`Ctrl+Alt+F2`) is blocked under cage on this board. **Do not add
+> `OnSuccess=getty@tty1.service`** to get a login prompt after `Esc`: it also
+> fires during every `systemctl restart`, which collides with the `tty1`
+> hand-off and **breaks "Update Firmware"** and manual restarts.
 
 Save (`Ctrl+O`, `Enter`, `Ctrl+X`), then enable and start:
 
@@ -203,8 +223,8 @@ journalctl -t cage -f      # watch it start (see note below)
 ```
 
 A healthy start logs `[config] …` and `[display] <W> x <H>`, and the lyrics
-appear on the HDMI display. Press `Ctrl+C` to stop watching the log (the service
-keeps running).
+screen appears on the HDMI display. Press `Ctrl+C` to stop watching the log (the
+service keeps running).
 
 > **Why `python3 -u`?** systemd hands the app a journal socket, not a terminal,
 > and Python block-buffers `print()` to anything that isn't a terminal. Without
@@ -223,12 +243,6 @@ keeps running).
 > ```bash
 > journalctl -t cage -f | grep -E '\[(config|display|track|sync|seek|lyrics|status)\]'
 > ```
-
-**Sanity-check the path if it's looping:**
-
-```bash
-grep ExecStart /etc/systemd/system/carlyric.service   # must show YOUR real home dir
-```
 
 ---
 
@@ -288,8 +302,7 @@ reachability check gates on the internet actually being down. Turn it off with
    Phone**.
 2. On your phone, pair with **`carlyric`** just like a Bluetooth speaker.
 3. Play a song — lyrics should scroll in sync. Tune offsets from the on-screen
-   menu or `config.json` (see [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) for
-   every key).
+   menu or `config.json` (see [README_Pi_Zero_2W.md](README_Pi_Zero_2W.md) for every key).
 
 **✅ That completes the required setup (Parts A–G).** If the lyrics scroll in
 sync, you're done. **Everything below is optional or for troubleshooting only** —
@@ -329,25 +342,28 @@ keys are in the [Pi Zero 2W guide](README_Pi_Zero_2W.md#word-level-karaoke).
 >   `sudo systemctl start getty@tty1` for a local login prompt. No other computer?
 >   Power-cycle — it boots straight back into the display.
 
-## Display gotchas (Pi 5) — only if the screen is black or wrong
+## Pi 5 display gotchas (only if the screen is black or wrong)
 
-Almost every "black screen / `Swapchain … failed test`" comes down to **something
-other than `cage` owning the HDMI output.** In order of how often they bite:
+Almost every "black screen / `Swapchain … failed test`" problem on the Pi 5 comes
+down to **something other than `cage` owning the HDMI output**. `cage` must be the
+only thing driving the display. In order of how often they bite:
 
 ### 1. The desktop is stealing the screen (most common)
 
-If you flashed the **"with desktop"** image, `labwc` (started by `lightdm`) holds
-DRM master and fights `cage`. Symptom: nonstop `Swapchain for output 'HDMI-A-1'
-failed test`, black screen. Switch to console — no reflash needed:
+If you flashed the **"with desktop"** image, `labwc` (the desktop's Wayland
+compositor, started by `lightdm`) holds DRM master and fights `cage`. Symptom:
+nonstop `Swapchain for output 'HDMI-A-1' failed test`, black screen.
+
+Check and fix — boot to console instead of the desktop:
 
 ```bash
 systemctl get-default                 # if 'graphical.target', the desktop is on
 sudo systemctl set-default multi-user.target
-sudo systemctl enable --now seatd     # the desktop used to start this for you
+sudo systemctl enable --now seatd     # desktop used to start this for you
 sudo reboot
 ```
 
-Confirm nothing else holds the GPU:
+To confirm nothing else holds the GPU:
 
 ```bash
 sudo fuser -v /dev/dri/card*          # should list only cage (+seatd), no labwc/Xorg
@@ -355,55 +371,59 @@ sudo fuser -v /dev/dri/card*          # should list only cage (+seatd), no labwc
 
 ### 2. The console holds DRM master at boot
 
-Even with no desktop, the framebuffer console owns `tty1` at boot: `Could not make
-device fd drm master: Device or resource busy`. The **Part E unit fixes this** via
-the `tty1` binding. If you wrote the unit without those lines, a manual run works
+Even with no desktop, the kernel framebuffer console owns `tty1` at boot, so a
+plain service can't get the display: `Could not make device fd drm master:
+Device or resource busy`. The **Part E unit fixes this** by binding `cage` to
+`tty1` (`Conflicts=getty@tty1.service`, `TTYPath`, `StandardInput=tty`,
+`PAMName=login`). If you wrote the unit without those lines, the manual run works
 but boot doesn't — add them.
 
 ### 3. pygame / SDL picks the wrong video backend
 
-The app logs `[display] <W> x <H> (SDL video driver: …)`.
+The app opens its window with `pygame.display.set_mode((0,0), FULLSCREEN)` and
+logs the result: `[display] <W> x <H> (SDL video driver: …)`.
 
 - **Correct:** `[display] 1920 x 440 (SDL video driver: x11)` — SDL runs through
   cage's Xwayland. **Leave SDL on its default; do _not_ set
-  `SDL_VIDEODRIVER=wayland`** (on this trixie/SDL build the native Wayland driver
-  reports *"did not add any displays"* or hangs in `set_mode()`).
-- **`[display] 1 x 1`** — you're hitting gotcha #1 (a second compositor is up).
-  Fix the desktop conflict, not SDL.
+  `SDL_VIDEODRIVER=wayland`.** On this trixie/SDL 2.32 build the native Wayland
+  driver either reports *"The video driver did not add any displays"* or hangs
+  forever inside `set_mode()` (black screen, only a cursor).
+- **`[display] 1 x 1`** — you're hitting gotcha #1 (a second compositor is up),
+  which corrupts Xwayland's screen size. Fix the desktop conflict, not SDL.
 
 ### Harmless log lines (ignore these)
 
 A healthy boot still prints these — they are **not** the problem:
 
-- `[EGL] … eglQueryDeviceStringEXT … EGL_BAD_PARAMETER` — a query V3D doesn't
-  support. This is the warning you'll see on every boot; safe to ignore.
+- `[EGL] … eglQueryDeviceStringEXT … EGL_BAD_PARAMETER` — a query V3D doesn't support.
 - `xkbcomp … Unsupported maximum keycode 708, clipping` — keymap warning.
-- `xwayland/xwm.c … Failed to get window property` / `xcb error …
-  ConfigureWindow` — cosmetic Xwayland startup noise.
+- `xwayland/xwm.c … Failed to get window property` / `xcb error … ConfigureWindow` — cosmetic Xwayland startup noise.
 
 ### Things that do *not* help (don't waste time)
 
 - **`WLR_DRM_NO_ATOMIC` / `WLR_DRM_NO_MODIFIERS` / `WLR_NO_HARDWARE_CURSORS`** —
-  only *silence* the swapchain error; the output still never reaches the app.
-- **`WLR_RENDERER=vulkan`** — fails with `Could not match drm and vulkan device`.
+  these only *silence* the swapchain error; the output still never reaches the
+  app. The real cause is always "who owns the display," above.
+- **`WLR_RENDERER=vulkan`** — fails with `Could not match drm and vulkan device`
+  (the Pi splits display=vc4 and render=v3d into separate DRM devices).
 - **`WLR_RENDERER=pixman` / `SDL_VIDEODRIVER=kmsdrm`** — both fail to start here.
-- **Forcing an HDMI mode in `cmdline.txt`** — the bar panel's native mode is
-  **1920×440**; forcing another mode gives a black screen. Let KMS pick the EDID
-  mode; remove any `video=…` you added.
+- **Forcing an HDMI mode in `cmdline.txt`** (e.g. `video=HDMI-A-1:1920x1080@60`)
+  — the bar panel's native mode is **1920×440**; forcing a mode it can't show
+  gives a black screen. Let KMS pick the EDID mode; remove any `video=…` you added.
 
 ---
 
-## (Optional) Carry over tuning from another Pi
+## (Optional) Carry over tuning from the Pi Zero
 
-To bring existing tuning and confirmed lyrics instead of starting blank, run from
-your computer with the other Pi powered on:
+To bring your existing tuning and confirmed lyrics instead of starting blank,
+run these from your computer with the Zero powered on:
 
 ```bash
-# pull from the old Pi
-scp    fuwenxu@<old-ip>:~/carlyrics/config.json     ./
-scp -r fuwenxu@<old-ip>:~/carlyrics/cache           ./
-scp    fuwenxu@<old-ip>:~/carlyrics/rejections.json ./   # if it exists
-scp    fuwenxu@<old-ip>:~/carlyrics/aliases.json    ./   # saved name corrections, if any
+# pull from the Zero
+scp    fuwenxu@<zero-ip>:~/carlyrics/config.json     ./
+scp -r fuwenxu@<zero-ip>:~/carlyrics/cache           ./
+scp    fuwenxu@<zero-ip>:~/carlyrics/rejections.json ./   # if it exists
+scp    fuwenxu@<zero-ip>:~/carlyrics/aliases.json    ./   # saved name corrections, if any
 
 # push to the Pi 5
 scp    ./config.json     fuwenxu@carlyric.local:~/carlyrics/
@@ -418,15 +438,19 @@ Then restart the service on the Pi 5:
 sudo systemctl restart carlyric.service
 ```
 
-> **Two Pis on one network:** if both are powered at once they'll both want the
-> hostname `carlyric`. mDNS disambiguates (e.g. `carlyric-2.local`), but it's
-> cleaner to keep only one powered during setup.
+(`config.json` hot-reloads within ~1 s, but a restart cleanly picks up the
+copied cache.)
+
+> **Two Pis on one network:** if both the Zero and the Pi 5 are powered at once
+> they'll both want the hostname `carlyric`. mDNS will disambiguate (e.g.
+> `carlyric-2.local`), but it's cleaner to keep only one powered during setup.
 
 ---
 
 ## Updating later
 
-From the screen: long-press → **Software Version → Update Firmware**, or manually:
+Same as the main build — from the screen: long-press → **Software Version →
+Update Firmware**, or manually:
 
 ```bash
 cd ~/carlyrics && git pull && sudo systemctl restart carlyric.service
