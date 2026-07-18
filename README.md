@@ -1,5 +1,11 @@
 # carlyrics on Raspberry Pi 5 — Raspberry Pi OS **Lite** (64-bit)
 
+![carlyrics: time-synced, karaoke-style lyrics scrolling over a background picture on the in-car bar display](Example/lyrics-over-wallpaper.png)
+
+> Your phone plays music over Bluetooth; the Pi reads the playback position and
+> scrolls **time-synced, karaoke-style lyrics** on a bar display in the car — no
+> app on the phone, nothing to tap while driving.
+
 Step-by-step setup for the car lyric display on a **Raspberry Pi 5** running the
 **64-bit _Lite_ (console-only, no desktop)** image. Tested end-to-end on a **Pi 5
 1GB**; any Pi 5 (1/2/4/8 GB) works — the app is light and never decodes audio.
