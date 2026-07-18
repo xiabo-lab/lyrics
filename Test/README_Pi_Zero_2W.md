@@ -81,6 +81,7 @@ that keeps your eyes on the road.
 
 | File | Purpose |
 |------|---------|
+| `README.md` | The Raspberry Pi 5 Lite setup guide (the repo's main page). |
 | `Lyrics_Display.py` | The app: BlueZ/AVRCP watcher, sync clock, pygame renderer, on-screen settings + Bluetooth pairing menu. |
 | `lyric_sources.py` | Multi-source synced-lyric fetcher (QQ / Kugou / NetEase / LRCLIB): one concurrent sweep, best-match scored, with on-disk cache and the RED-button picker grid. Prefers word-by-word lyrics (Kugou KRC / QQ QRC) where available. |
 | `lrclib.py` | LRCLIB client + the `.lrc` parser (`parse_lrc`, handles enhanced/word-level LRC) and `LyricLine`/`Word` types. |
@@ -89,6 +90,7 @@ that keeps your eyes on the road.
 | `Font/Aldrich-Regular.ttc` / `Font/advanced_led_board-7.ttc` | Idle-clock fonts (square Aldrich in use; LED alt bundled). Missing → the clock falls back to Noto. |
 | `Assets/*icon.png` / `Assets/*icon.jpg` | Per-source badges (QQ / Kugou / NetEase / LRCLIB) shown on picker results. |
 | `pinyin_table.json` | Offline pinyin→Hanzi table for the Modify Search IME. |
+| `build_pinyin_table.py` | One-off generator that (re)builds `pinyin_table.json`. |
 | `bt-agent.service` | systemd unit for the headless Bluetooth pairing agent. |
 | `99-carlyric-ignore-avrcp-pointer.rules` | udev rule so the phone's AVRCP device isn't treated as a mouse (stops a stray cursor). |
 | `wifi.sh` | One-shot helper to join a new Wi-Fi network via NetworkManager. |
@@ -98,8 +100,11 @@ that keeps your eyes on the road.
 | `Font/` | Idle-clock fonts (shipped via the OTA sync list). |
 | `image/` | Background pictures for Settings → Background Picture; drop your own here (bundled `Sample 1–10`, live-scanned at runtime). |
 | `Example/` | Sample photos of the display, for the docs. |
+| `Bill of Material/` | Parts list for building the display (BoM spreadsheet). |
 | `Test/` | Archived setup guides (Pi 5 full-desktop, Pi Zero 2W, the overview README) plus scratch/manual test scripts from development (display, touch, AVRCP probes). |
-| `cache/` | Confirmed lyrics, one `.lrc` per song (created at runtime). |
+| `cache/` | Confirmed lyrics, one `.lrc` per song (created at runtime; git-ignored). |
+| `rejections.json` | Songs you've triple-tap-deleted, so they aren't re-cached (created at runtime; git-ignored). |
+| `LICENSE` | MIT licence. |
 
 ---
 
