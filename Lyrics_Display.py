@@ -68,7 +68,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.12.1"
+APP_VERSION = "1.13.0"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -116,14 +116,13 @@ BG = (0, 0, 0)   # menus/picker/panels always paint on this, so controls read
 # editable on-screen via Settings → Background Picture.
 BACKGROUND_MODE = "solid"          # "solid" | "picture"
 BACKGROUND_COLOR = (0, 0, 0)       # one of BG_SOLID_COLORS (solid mode)
-BACKGROUND_IMAGE = ""              # filename inside Wallpaper/; "" = first found
-BACKGROUND_SLIDESHOW = False       # picture mode: cycle through Wallpaper/
-# Seconds per picture. Stepped in whole half-hours: a backdrop is scenery, not
-# something to watch change, so the useful range is "occasionally" not "often".
-BACKGROUND_SLIDESHOW_S = 1800      # 30 min
-BACKGROUND_SLIDESHOW_STEP_S = 1800  # one tap = 30 min
-BACKGROUND_SLIDESHOW_MIN_S = 1800   # 30 min
-BACKGROUND_SLIDESHOW_MAX_S = 14400  # 4 h — 8 taps end to end
+# Picture mode keeps two slots so the backdrop follows the clock: the DAY
+# picture shows 6:00 AM–5:59 PM, the NIGHT picture 6:00 PM–5:59 AM. Either is a
+# filename inside Wallpaper/; "" = first picture found. See is_daytime().
+BACKGROUND_IMAGE_DAY = ""
+BACKGROUND_IMAGE_NIGHT = ""
+BG_DAY_START_HOUR = 6              # inclusive; day runs [6, 18)
+BG_NIGHT_START_HOUR = 18          # inclusive; night runs [18, 6)
 # Extra darkening of the PICTURE only, in percent, on top of the night auto-dim.
 # Buys contrast for the lyrics on a busy or bright picture without touching the
 # text colours. Pictures only — a solid backdrop has nothing to fight.
@@ -152,7 +151,7 @@ BG_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp")
 # Per-line colours. These are DEFAULTS; the live values are set from the
 # named-colour palette (SETTING_COLORS) via current_color / top_color /
 # bottom_color in config.json, editable in the on-screen settings panel
-# (long-press 10s). CURRENT = the now line, PREV = the TOP context line,
+# (long-press 5s). CURRENT = the now line, PREV = the TOP context line,
 # NEXT = the BOTTOM context line.
 CURRENT = (255, 220, 80)     # now line    — Yellow
 PREV = (235, 235, 235)       # top line    — White
@@ -167,6 +166,9 @@ FONT_PATH = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"
 # can ship it. get_font falls back to FONT_PATH if it's missing. Alt LED face
 # `Font/advanced_led_board-7.ttc` also ships alongside.
 CLOCK_FONT_PATH = str(INSTALL_DIR / "Font" / "Aldrich-Regular.ttc")
+# Idle clock format: True = 24-hour "HH:MM:SS", False = 12-hour "HH:MM AM/PM".
+# Toggled on-screen in Settings → Software Version.
+CLOCK_24H = True
 FONT_CURRENT = 56   # current/now line (and intro line)
 FONT_TOP = 34       # top context line (previous lyric)
 FONT_BOTTOM = 34    # bottom context line (next lyric)
@@ -235,13 +237,13 @@ TAP_MAX_DUR_S = 0.4          # …and lifts within this long (else it's a swipe/
 # should happen parked or on a home desktop. Set to 0 to skip the notice.
 SAFETY_NOTICE_S = 6.0
 
-# ---- On-screen settings (long-press 10s) ----------------------------------
+# ---- On-screen settings (long-press 5s) -----------------------------------
 # Hold one finger still on the screen for this long to open the settings
 # panel: a font-size slider + a 6-colour palette for each of the three lines
 # (current / top / bottom). Changes preview live and are written to
 # config.json on "Done", so they persist and ride the same hot-reload path as
 # a hand edit.
-LONGPRESS_OPEN_S = 10.0
+LONGPRESS_OPEN_S = 5.0
 SETTINGS_FONT_MIN = 20    # smallest font the size slider can reach (left end)
 SETTINGS_FONT_MAX = 160   # largest font the size slider can reach (right end)
 # Selectable colour palette, in slider/swatch order. Stored in config.json as
@@ -305,11 +307,11 @@ _CONFIG_DEFAULTS = {
     "auto_recover": AUTO_RECOVER,
     "karaoke_sync": KARAOKE_SYNC,
     "karaoke_color": color_name_of(KARAOKE_COLOR),
+    "clock_24h": CLOCK_24H,
     "background_mode": BACKGROUND_MODE,
     "background_color": "black",
-    "background_image": BACKGROUND_IMAGE,
-    "background_slideshow": BACKGROUND_SLIDESHOW,
-    "background_slideshow_s": BACKGROUND_SLIDESHOW_S,
+    "background_image_day": BACKGROUND_IMAGE_DAY,
+    "background_image_night": BACKGROUND_IMAGE_NIGHT,
     "background_dim": BACKGROUND_DIM,
 }
 
@@ -321,7 +323,7 @@ _ENUM_KEYS = {
 }
 # Free-form strings (a filename we can't validate here — the picture may be
 # added to Wallpaper/ later, and a missing one falls back to the solid colour).
-_FREE_STRING_KEYS = {"background_image"}
+_FREE_STRING_KEYS = {"background_image_day", "background_image_night"}
 
 
 def load_config() -> dict:
@@ -339,6 +341,15 @@ def load_config() -> dict:
     except (OSError, json.JSONDecodeError) as e:
         print(f"[config] {CONFIG_PATH.name} unreadable ({e}); using defaults")
         return cfg
+    # Migrate the pre-day/night single picture: an existing background_image
+    # (and its slideshow keys, now gone) seed both slots, so upgrading keeps
+    # showing that picture round the clock until the user sets a night one.
+    legacy = user.pop("background_image", None)
+    user.pop("background_slideshow", None)
+    user.pop("background_slideshow_s", None)
+    if isinstance(legacy, str):
+        user.setdefault("background_image_day", legacy)
+        user.setdefault("background_image_night", legacy)
     for key, val in user.items():
         if key not in cfg:
             print(f"[config] ignoring unknown key: {key}")
@@ -399,9 +410,9 @@ def apply_config() -> None:
     global TOP_BOLD, BOTTOM_BOLD
     global PROGRESS_BAR, DIM_ENABLED, DAY_START_HOUR, NIGHT_START_HOUR
     global NIGHT_BRIGHTNESS, MAX_LINE_WIDTH_FRAC, AUTOCONNECT, FLIP_180
-    global AUTO_RECOVER, KARAOKE_SYNC, KARAOKE_COLOR
-    global BACKGROUND_MODE, BACKGROUND_COLOR, BACKGROUND_IMAGE
-    global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S, BACKGROUND_DIM
+    global AUTO_RECOVER, KARAOKE_SYNC, KARAOKE_COLOR, CLOCK_24H
+    global BACKGROUND_MODE, BACKGROUND_COLOR
+    global BACKGROUND_IMAGE_DAY, BACKGROUND_IMAGE_NIGHT, BACKGROUND_DIM
     cfg = load_config()
     LATENCY_OFFSET_MS = cfg["latency_offset_ms"]
     LEAD_OFFSET_MS = cfg["lead_offset_ms"]
@@ -430,17 +441,11 @@ def apply_config() -> None:
     AUTO_RECOVER = cfg["auto_recover"]
     KARAOKE_SYNC = cfg["karaoke_sync"]
     KARAOKE_COLOR = COLOR_BY_NAME[cfg["karaoke_color"]]
+    CLOCK_24H = cfg["clock_24h"]
     BACKGROUND_MODE = cfg["background_mode"]
     BACKGROUND_COLOR = BG_COLOR_BY_NAME[cfg["background_color"]]
-    BACKGROUND_IMAGE = cfg["background_image"]
-    BACKGROUND_SLIDESHOW = cfg["background_slideshow"]
-    # Snap onto the half-hour grid before clamping: a config written by an older
-    # build (or by hand) can hold arbitrary seconds, and ± would then walk off
-    # the grid forever — 530s becoming 2330s, 4130s, …
-    snapped = (round(cfg["background_slideshow_s"] / BACKGROUND_SLIDESHOW_STEP_S)
-               * BACKGROUND_SLIDESHOW_STEP_S)
-    BACKGROUND_SLIDESHOW_S = max(BACKGROUND_SLIDESHOW_MIN_S,
-                                 min(BACKGROUND_SLIDESHOW_MAX_S, snapped))
+    BACKGROUND_IMAGE_DAY = cfg["background_image_day"]
+    BACKGROUND_IMAGE_NIGHT = cfg["background_image_night"]
     BACKGROUND_DIM = max(0, min(BACKGROUND_DIM_MAX, cfg["background_dim"]))
 
 
@@ -454,12 +459,14 @@ def readable_text_on(rgb) -> tuple:
         else (235, 235, 235)
 
 
-def fmt_slideshow_interval(seconds: int) -> str:
-    """Seconds → a glanceable half-hour label: '30 min', '1 h', '1 h 30 min'."""
-    hours, mins = divmod(max(0, seconds) // 60, 60)
-    if not hours:
-        return f"{mins} min"
-    return f"{hours} h" if not mins else f"{hours} h {mins} min"
+def is_daytime(hour: int = None) -> bool:
+    """True during the DAY window (6:00 AM–5:59 PM local), else False.
+
+    Drives which picture slot the backdrop shows. `hour` is injectable for
+    tests; live callers pass nothing and read the Pi's local clock."""
+    if hour is None:
+        hour = time.localtime().tm_hour
+    return BG_DAY_START_HOUR <= hour < BG_NIGHT_START_HOUR
 
 
 def bg_color_name_of(rgb) -> str:
@@ -468,18 +475,6 @@ def bg_color_name_of(rgb) -> str:
         if tuple(c) == tuple(rgb):
             return name.lower()
     return BG_SOLID_COLORS[0][0].lower()
-
-
-def _active_background_image() -> str:
-    """The picture to show: the configured one, else the first in Wallpaper/.
-
-    Falling back to the first means picking "Picture" mode does something
-    sensible before a file has ever been chosen, and that a configured picture
-    which has since been deleted doesn't leave a blank screen."""
-    images = list_background_images()
-    if BACKGROUND_IMAGE in images:
-        return BACKGROUND_IMAGE
-    return images[0] if images else ""
 
 
 def _natural_key(name: str):
@@ -2180,9 +2175,11 @@ def draw_karaoke_line(screen, text, size, bold, base_color, sung_color,
 
 
 def draw_clock(screen, segments, size, bold, center_xy, rotate_deg, font_path):
-    """Render a clock as coloured segments — `segments` is a list of (text, rgb),
-    e.g. HH red / ':' white / MM yellow / ':' white / SS green — on a MONOSPACED
-    grid so the time never drifts as digits change.
+    """Render a clock as coloured segments — `segments` is a list of
+    (text, rgb, outline_rgb), e.g. HH red / ':' white / MM yellow / ':' white /
+    SS green — on a MONOSPACED grid so the time never drifts as digits change.
+    outline_rgb strokes that segment's glyphs (like the lyric text) so the clock
+    reads over any backdrop; None draws them plain.
 
     Every digit gets the same cell width (the widest of 0-9) and is centered in
     it, so a proportional face like Aldrich (where '1' is narrower than '8')
@@ -2195,26 +2192,44 @@ def draw_clock(screen, segments, size, bold, center_xy, rotate_deg, font_path):
     space above and below. (rotate_deg is 0 for the clock's monitor.)"""
     font = get_font(size, bold, font_path)
     digit_w = max(font.size(str(d))[0] for d in range(10))
-    chars = [(ch, col) for text, col in segments for ch in text]
+    chars = [(ch, col, ocol) for text, col, ocol in segments for ch in text]
     if not chars:
         return
 
     def cell_w(ch):
         return digit_w if ch.isdigit() else font.size(ch)[0]
 
-    total_w = sum(cell_w(ch) for ch, _ in chars)
-    strip = pygame.Surface((total_w, font.get_height()), pygame.SRCALPHA)
+    # Pad the strip so a stroked glyph (grown by the outline width on every side)
+    # isn't clipped at the top/bottom; ink-centering at the end absorbs the pad.
+    pad = (outline_width_for(size)
+           if any(ocol is not None for _, _, ocol in chars) else 0)
+    total_w = sum(cell_w(ch) for ch, _, _ in chars)
+    strip = pygame.Surface((total_w, font.get_height() + 2 * pad),
+                           pygame.SRCALPHA)
     x = 0
-    for ch, col in chars:
+    for ch, col, ocol in chars:
         cw = cell_w(ch)
         g = font.render(ch, True, col)
-        strip.blit(g, (x + (cw - g.get_width()) // 2, 0))  # centre glyph in its cell
+        if ocol is not None:
+            g = _stroked(g, font, ch, ocol, pad)
+        # centre glyph in its cell (h) and in the padded strip (v)
+        strip.blit(g, (x + (cw - g.get_width()) // 2,
+                       (strip.get_height() - g.get_height()) // 2))
         x += cw
     if rotate_deg:
         strip = pygame.transform.rotate(strip, rotate_deg)
     ink = strip.get_bounding_rect()
     cx, cy = center_xy
     screen.blit(strip, (cx - strip.get_width() // 2, cy - ink.centery))
+
+
+def clock_grid_width(font, text: str) -> int:
+    """Width of `text` laid out on draw_clock's monospaced grid: every digit
+    takes the widest digit cell, other chars their natural width. Used to size
+    the idle clock so it fills the screen regardless of format (the 24-hour and
+    12-hour AM/PM strings are different widths)."""
+    digit_w = max(font.size(str(d))[0] for d in range(10))
+    return sum(digit_w if ch.isdigit() else font.size(ch)[0] for ch in text)
 
 
 def _draw_progress(screen, w, curr_center, lines, idx, t_ms, bf):
@@ -2959,14 +2974,16 @@ def draw_bluetooth(screen, w, h, bt: "BluetoothAdmin") -> None:
 
 # ---- Software version screen -----------------------------------------------
 def _version_layout(w: int, h: int):
-    """Geometry for the Version screen: (update_btn, back_btn). Both full-width,
-    stacked at the bottom so the build info sits above them."""
+    """Geometry for the Version screen: (clock_btn, update_btn, back_btn). Three
+    full-width buttons stacked at the bottom so the build info sits above them."""
     margin_x = max(20, int(w * 0.12))
     bw = w - 2 * margin_x
     bh = int(h * 0.15)
+    gap = max(12, int(h * 0.04))
     back = pygame.Rect(margin_x, h - int(h * 0.19), bw, bh)
-    update = pygame.Rect(margin_x, back.y - bh - max(12, int(h * 0.04)), bw, bh)
-    return update, back
+    update = pygame.Rect(margin_x, back.y - bh - gap, bw, bh)
+    clock = pygame.Rect(margin_x, update.y - bh - gap, bw, bh)
+    return clock, update, back
 
 
 def draw_version(screen, w, h, bt: "BluetoothAdmin",
@@ -2989,7 +3006,14 @@ def draw_version(screen, w, h, bt: "BluetoothAdmin",
     for surf in lines:
         screen.blit(surf, surf.get_rect(midtop=(w // 2, y)))
         y += surf.get_height() + 12
-    update, back = _version_layout(w, h)
+    clock, update, back = _version_layout(w, h)
+    # Clock-format toggle: flips the idle screen between 24-hour HH:MM:SS and
+    # 12-hour HH:MM AM/PM.
+    pygame.draw.rect(screen, (55, 70, 95), clock, border_radius=14)
+    clbl = ("Clock: 24-hour (HH:MM:SS)" if CLOCK_24H
+            else "Clock: 12-hour (HH:MM AM/PM)")
+    c = btn_font.render(clbl, True, (235, 235, 235))
+    screen.blit(c, c.get_rect(center=clock.center))
     # Update button: amber while armed/working, slate otherwise.
     busy_or_armed = updater.busy or updater.armed
     pygame.draw.rect(screen, (150, 110, 30) if busy_or_armed else (40, 90, 140),
@@ -3179,16 +3203,22 @@ BG_TILES_PER_PAGE = 5
 def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
     """Geometry for the Background Picture screen, in LOGICAL (pre-flip) px.
 
-    Returns (rows, choices, slide, nav, back):
-      rows    = {"mode": Rect, "choice": Rect, "slide": Rect}  — label strips
-      choices = [(value, Rect), ...] — colour names (solid) or filenames
-      slide   = {"toggle","minus","plus","value"} Rects, or None in solid mode
-      dim     = {"minus","plus","value"} Rects, or None in solid mode
-      nav     = {"prev": Rect, "next": Rect} or None when everything fits
-      back    = Rect
+    Returns (rows, mode_rects, choices, night_choices, dim, nav, night_nav, back):
+      rows         = {"mode","choice","slide","dim": Rect} — label strips
+      mode_rects   = [(value, Rect), ...] — Solid / Picture
+      choices      = [(value, Rect), ...] — colour swatches (solid) or the DAY
+                     picture tiles (picture mode)
+      night_choices= [(value, Rect), ...] — the NIGHT picture tiles (picture
+                     mode); [] in solid mode
+      dim          = {"minus","plus","value"} Rects, or None in solid mode
+      nav          = {"prev","next"} for the DAY row, or None when it all fits
+      night_nav    = same for the NIGHT row, or None
+      back         = Rect
 
     The four row bands are fixed regardless of mode, so switching Solid↔Picture
-    doesn't make the controls jump around under the user's finger.
+    doesn't make the controls jump around under the user's finger. In picture
+    mode the "choice" band is the Day tiles and the "slide" band is the Night
+    tiles, so the backdrop can follow the clock.
     """
     margin_x = max(20, int(w * 0.05))
     top = int(h * 0.06)
@@ -3217,26 +3247,18 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
         return [(v, pygame.Rect(ctrl_x + i * (bw + bgap), by, bw, bh))
                 for i, v in enumerate(values)]
 
-    # --- mode row: Solid | Picture
-    mode_rects = _btn_row(rows["mode"], ("solid", "picture"), 2)
-
-    # --- choice row: three flat colours, or one page of picture tiles
-    nav = None
-    if mode == "solid":
-        names = [n.lower() for n, _rgb in BG_SOLID_COLORS]
-        choices = _btn_row(rows["choice"], names, len(names))
-    else:
-        images = list_background_images()
-        n_images = len(images)
-        pages = max(1, (n_images + BG_TILES_PER_PAGE - 1) // BG_TILES_PER_PAGE)
+    def _tile_row(rect, images, page):
+        """One page of picture tiles across `rect`'s control column, with ‹ ›
+        arrows when there's more than a page. Returns (choices, nav)."""
+        pages = max(1, (len(images) + BG_TILES_PER_PAGE - 1) // BG_TILES_PER_PAGE)
         page = max(0, min(page, pages - 1))
         shown = images[page * BG_TILES_PER_PAGE:(page + 1) * BG_TILES_PER_PAGE]
-        crect = rows["choice"]
+        nav = None
         if pages > 1:
             # Reserve arrows at both ends, tiles share what's left.
             aw = max(36, int(ctrl_w * 0.05))
-            nav = {"prev": pygame.Rect(ctrl_x, crect.y, aw, crect.h),
-                   "next": pygame.Rect(w - margin_x - aw, crect.y, aw, crect.h)}
+            nav = {"prev": pygame.Rect(ctrl_x, rect.y, aw, rect.h),
+                   "next": pygame.Rect(w - margin_x - aw, rect.y, aw, rect.h)}
             tiles_x = ctrl_x + aw + gap
             tiles_w = (w - margin_x - aw - gap) - tiles_x
         else:
@@ -3247,26 +3269,24 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
             tw = (tiles_w - (len(shown) - 1) * tgap) // len(shown)
             for i, nm in enumerate(shown):
                 choices.append((nm, pygame.Rect(tiles_x + i * (tw + tgap),
-                                                crect.y, tw, crect.h)))
+                                                rect.y, tw, rect.h)))
+        return choices, nav
 
-    # --- slideshow row: Yes/No + interval stepper (pictures only)
-    slide = None
-    if mode == "picture":
-        srect = rows["slide"]
-        bh = min(srect.h - 6, int(srect.h * 0.86))
-        by = srect.y + (srect.h - bh) // 2
-        tw = int(ctrl_w * 0.22)
-        toggle = pygame.Rect(ctrl_x, by, tw, bh)
-        # Keep −/value/+ grouped next to the toggle instead of spanning the
-        # control column: this panel is 1920px wide, so pinning + to the far
-        # edge would leave the two halves of one stepper ~1000px apart, reading
-        # as unrelated buttons.
-        btn = min(bh, max(44, int(ctrl_w * 0.07)))
-        val_w = max(90, int(ctrl_w * 0.10))
-        minus = pygame.Rect(ctrl_x + tw + gap * 3, by, btn, bh)
-        value = pygame.Rect(minus.right + gap, by, val_w, bh)
-        plus = pygame.Rect(value.right + gap, by, btn, bh)
-        slide = {"toggle": toggle, "minus": minus, "plus": plus, "value": value}
+    # --- mode row: Solid | Picture
+    mode_rects = _btn_row(rows["mode"], ("solid", "picture"), 2)
+
+    # --- choice / slide rows: colour swatches (solid) OR Day + Night tiles.
+    nav = night_nav = None
+    night_choices = []
+    if mode == "solid":
+        names = [n.lower() for n, _rgb in BG_SOLID_COLORS]
+        choices = _btn_row(rows["choice"], names, len(names))
+    else:
+        images = list_background_images()
+        # Both rows page together off the same index, so any picture is reachable
+        # for either slot without a second pager crowding the short panel.
+        choices, nav = _tile_row(rows["choice"], images, page)
+        night_choices, night_nav = _tile_row(rows["slide"], images, page)
 
     # --- dim row: darken the picture (pictures only, same reason)
     dim = None
@@ -3276,7 +3296,8 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
         by = drect.y + (drect.h - bh) // 2
         btn = min(bh, max(44, int(ctrl_w * 0.07)))
         val_w = max(90, int(ctrl_w * 0.10))
-        # Line the stepper up under the slideshow's, so the two read as a column.
+        # Group −/value/+ near the label rather than spanning the 1920px column,
+        # so the two halves of one stepper don't read as unrelated buttons.
         minus = pygame.Rect(ctrl_x + int(ctrl_w * 0.22) + gap * 3, by, btn, bh)
         value = pygame.Rect(minus.right + gap, by, val_w, bh)
         plus = pygame.Rect(value.right + gap, by, btn, bh)
@@ -3285,7 +3306,7 @@ def _background_layout(w: int, h: int, mode: str, n_images: int, page: int):
     margin_b = max(20, int(w * 0.12))
     back = pygame.Rect(margin_b, h - back_h - bottom_pad, w - 2 * margin_b,
                        back_h)
-    return rows, mode_rects, choices, slide, dim, nav, back
+    return (rows, mode_rects, choices, night_choices, dim, nav, night_nav, back)
 
 
 def draw_background(screen, w, h, page: int) -> None:
@@ -3294,47 +3315,26 @@ def draw_background(screen, w, h, page: int) -> None:
     label_font = get_font(max(16, min(32, h // 22)), True)
     btn_font = get_font(max(16, min(34, h // 20)), True)
     note_font = get_font(max(14, min(24, h // 28)), False)
-    rows, mode_rects, choices, slide, dim, nav, back = _background_layout(
-        w, h, BACKGROUND_MODE, len(list_background_images()), page)
+    images = list_background_images()
+    rows, mode_rects, choices, night_choices, dim, nav, night_nav, back = \
+        _background_layout(w, h, BACKGROUND_MODE, len(images), page)
+    day_now = is_daytime()
 
     def _label(rect, text, dim=False):
         s = label_font.render(text, True, (120, 120, 130) if dim
                               else (235, 235, 235))
         screen.blit(s, (rect.x + 4, rect.centery - s.get_height() // 2))
 
-    # Mode row.
-    _label(rows["mode"], "Background")
-    for value, r in mode_rects:
-        on = BACKGROUND_MODE == value
-        pygame.draw.rect(screen, (40, 120, 50) if on else (45, 45, 58), r,
-                         border_radius=12)
-        s = btn_font.render("Solid Colour" if value == "solid" else "Picture",
-                            True, (255, 255, 255) if on else (200, 200, 200))
-        screen.blit(s, s.get_rect(center=r.center))
+    def _effective(slot):
+        """The picture a slot actually shows: its pick, else the first image."""
+        if slot in images:
+            return slot
+        return images[0] if images else ""
 
-    # Choice row.
-    if BACKGROUND_MODE == "solid":
-        _label(rows["choice"], "Colour")
-        for value, r in choices:
-            pygame.draw.rect(screen, BG_COLOR_BY_NAME[value], r,
-                             border_radius=10)
-            # Black on black needs an outline to be visible at all.
-            pygame.draw.rect(screen, (90, 90, 100), r, 2, border_radius=10)
-            if bg_color_name_of(BACKGROUND_COLOR) == value:
-                pygame.draw.rect(screen, (255, 255, 255), r.inflate(8, 8), 3,
-                                 border_radius=13)
-            s = btn_font.render(BG_COLOR_LABELS[value], True,
-                                readable_text_on(BG_COLOR_BY_NAME[value]))
-            screen.blit(s, s.get_rect(center=r.center))
-    else:
-        _label(rows["choice"], "Picture")
-        if not choices:
-            s = note_font.render(
-                f"No pictures in Wallpaper/ — copy {w} x {h} images there.",
-                True, (255, 170, 90))
-            screen.blit(s, (rows["choice"].x + int(w * 0.17),
-                            rows["choice"].centery - s.get_height() // 2))
-        for value, r in choices:
+    def _draw_tiles(row_choices, row_nav, selected):
+        """Draw one page of picture tiles, boxing the one that `selected`
+        resolves to, plus the ‹ › pager when present."""
+        for value, r in row_choices:
             thumb = background_surface(value, r.w, r.h)
             if thumb is not None:
                 screen.blit(thumb, r.topleft)
@@ -3349,39 +3349,60 @@ def draw_background(screen, w, h, page: int) -> None:
             shade.fill((0, 0, 0))
             screen.blit(shade, strip.topleft)
             screen.blit(cap, cap.get_rect(center=strip.center))
-            if value == _active_background_image():
+            if value == _effective(selected):
                 pygame.draw.rect(screen, (255, 255, 255), r, 4,
                                  border_radius=10)
-        if nav:
+        if row_nav:
             for nk, sym in (("prev", "‹"), ("next", "›")):
-                pygame.draw.rect(screen, (45, 45, 58), nav[nk],
+                pygame.draw.rect(screen, (45, 45, 58), row_nav[nk],
                                  border_radius=10)
                 s = btn_font.render(sym, True, (235, 235, 235))
-                screen.blit(s, s.get_rect(center=nav[nk].center))
+                screen.blit(s, s.get_rect(center=row_nav[nk].center))
 
-    # Slideshow row — pictures only; there is nothing to cycle through when the
-    # background is one flat colour.
-    if slide is None:
-        _label(rows["slide"], "Slideshow", dim=True)
-        s = note_font.render("(pictures only)", True, (120, 120, 130))
+    # Mode row.
+    _label(rows["mode"], "Background")
+    for value, r in mode_rects:
+        on = BACKGROUND_MODE == value
+        pygame.draw.rect(screen, (40, 120, 50) if on else (45, 45, 58), r,
+                         border_radius=12)
+        s = btn_font.render("Solid Colour" if value == "solid" else "Picture",
+                            True, (255, 255, 255) if on else (200, 200, 200))
+        screen.blit(s, s.get_rect(center=r.center))
+
+    # Choice / slide rows.
+    if BACKGROUND_MODE == "solid":
+        _label(rows["choice"], "Colour")
+        for value, r in choices:
+            pygame.draw.rect(screen, BG_COLOR_BY_NAME[value], r,
+                             border_radius=10)
+            # Black on black needs an outline to be visible at all.
+            pygame.draw.rect(screen, (90, 90, 100), r, 2, border_radius=10)
+            if bg_color_name_of(BACKGROUND_COLOR) == value:
+                pygame.draw.rect(screen, (255, 255, 255), r.inflate(8, 8), 3,
+                                 border_radius=13)
+            s = btn_font.render(BG_COLOR_LABELS[value], True,
+                                readable_text_on(BG_COLOR_BY_NAME[value]))
+            screen.blit(s, s.get_rect(center=r.center))
+        # The Day/Night slide row has no meaning for a flat colour.
+        _label(rows["slide"], "Pictures", dim=True)
+        s = note_font.render("(Day / Night - pictures only)", True,
+                             (120, 120, 130))
         screen.blit(s, (rows["slide"].x + int(w * 0.17),
                         rows["slide"].centery - s.get_height() // 2))
     else:
-        _label(rows["slide"], "Slideshow")
-        on = BACKGROUND_SLIDESHOW
-        pygame.draw.rect(screen, (40, 120, 50) if on else (95, 55, 55),
-                         slide["toggle"], border_radius=12)
-        s = btn_font.render("Yes" if on else "No", True, (255, 255, 255))
-        screen.blit(s, s.get_rect(center=slide["toggle"].center))
-        for bk, sym in (("minus", "−"), ("plus", "+")):
-            pygame.draw.rect(screen, (45, 80, 130) if on else (50, 50, 60),
-                             slide[bk], border_radius=10)
-            s = btn_font.render(sym, True, (255, 255, 255) if on
-                                else (120, 120, 130))
-            screen.blit(s, s.get_rect(center=slide[bk].center))
-        vs = btn_font.render(fmt_slideshow_interval(BACKGROUND_SLIDESHOW_S),
-                             True, (255, 220, 120) if on else (120, 120, 130))
-        screen.blit(vs, vs.get_rect(center=slide["value"].center))
+        # Day tiles in the "choice" band, Night tiles in the "slide" band; the
+        # active one (per the local clock) is flagged so it's clear which is
+        # showing right now.
+        _label(rows["choice"], "Day" + ("  (now)" if day_now else ""))
+        _label(rows["slide"], "Night" + ("" if day_now else "  (now)"))
+        if not choices:
+            s = note_font.render(
+                f"No pictures in Wallpaper/ — copy {w} x {h} images there.",
+                True, (255, 170, 90))
+            screen.blit(s, (rows["choice"].x + int(w * 0.17),
+                            rows["choice"].centery - s.get_height() // 2))
+        _draw_tiles(choices, nav, BACKGROUND_IMAGE_DAY)
+        _draw_tiles(night_choices, night_nav, BACKGROUND_IMAGE_NIGHT)
 
     # Dim row — pictures only; a solid backdrop has nothing to darken behind
     # the lyrics.
@@ -3662,7 +3683,7 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     # picker list is kept underneath so Back returns to the grid unchanged.
     editor: "SearchEditor | None" = None
 
-    # ---- Settings menu (long-press 10s) -------------------------------------
+    # ---- Settings menu (long-press 5s) --------------------------------------
     # menu_screen drives a small state machine that replaces lyric rendering:
     #   None         → live lyrics
     #   "main"       → top-level menu (Font / Bluetooth / Software Version)
@@ -3688,12 +3709,10 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                        "top": color_name_of(PREV),
                        "bottom": color_name_of(NEXT),
                        "karaoke": color_name_of(KARAOKE_COLOR)}
-    # Background screen: which tile page is shown, and when the slideshow last
-    # advanced. bg_slide_name is the picture actually on screen — held separately
-    # from BACKGROUND_IMAGE so a slideshow can move on without overwriting (and
-    # persisting) the user's chosen picture.
+    # Background screen: which tile page is shown, and the picture actually on
+    # screen (bg_slide_name) — re-derived each frame from the Day/Night slots and
+    # the local clock, so it isn't a persisted value.
     bg_page = 0
-    bg_slide_at = time.monotonic()
     bg_slide_name = ""
     bg_images: list[str] = []
     bg_images_at = 0.0     # last Wallpaper/ scan; 0.0 forces one on the first frame
@@ -3976,16 +3995,15 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
             write_config_values({
                 "background_mode": BACKGROUND_MODE,
                 "background_color": bg_color_name_of(BACKGROUND_COLOR),
-                "background_image": BACKGROUND_IMAGE,
-                "background_slideshow": BACKGROUND_SLIDESHOW,
-                "background_slideshow_s": BACKGROUND_SLIDESHOW_S,
+                "background_image_day": BACKGROUND_IMAGE_DAY,
+                "background_image_night": BACKGROUND_IMAGE_NIGHT,
                 "background_dim": BACKGROUND_DIM,
             })
             last_cfg_mtime = _cfg_mtime()
             print(f"[background] saved mode={BACKGROUND_MODE} "
                   f"colour={bg_color_name_of(BACKGROUND_COLOR)} "
-                  f"image={BACKGROUND_IMAGE or '(first)'} "
-                  f"slideshow={BACKGROUND_SLIDESHOW}/{BACKGROUND_SLIDESHOW_S}s "
+                  f"day={BACKGROUND_IMAGE_DAY or '(first)'} "
+                  f"night={BACKGROUND_IMAGE_NIGHT or '(first)'} "
                   f"dim={BACKGROUND_DIM}%")
         except Exception as e:
             print(f"[background] save failed: {e}")
@@ -3993,61 +4011,55 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
     def background_touch(lx: float, ly: float) -> None:
         """Tap handler for the Background Picture screen (tap-only). Every
         change previews live and persists immediately, like Other Settings."""
-        nonlocal menu_screen, bg_page, bg_slide_at, bg_slide_name
-        global BACKGROUND_MODE, BACKGROUND_COLOR, BACKGROUND_IMAGE
-        global BACKGROUND_SLIDESHOW, BACKGROUND_SLIDESHOW_S, BACKGROUND_DIM
+        nonlocal menu_screen, bg_page, bg_slide_name
+        global BACKGROUND_MODE, BACKGROUND_COLOR
+        global BACKGROUND_IMAGE_DAY, BACKGROUND_IMAGE_NIGHT, BACKGROUND_DIM
         images = list_background_images()
-        rows, mode_rects, choices, slide, dim, nav, back = _background_layout(
-            w, h, BACKGROUND_MODE, len(images), bg_page)
+        rows, mode_rects, choices, night_choices, dim, nav, night_nav, back = \
+            _background_layout(w, h, BACKGROUND_MODE, len(images), bg_page)
         if back.collidepoint(lx, ly):
             menu_screen = "main"
             return
         for value, r in mode_rects:
             if r.collidepoint(lx, ly):
                 BACKGROUND_MODE = value
-                bg_slide_at = time.monotonic()
                 background_save()
                 return
-        if nav:
-            pages = max(1, (len(images) + BG_TILES_PER_PAGE - 1)
-                        // BG_TILES_PER_PAGE)
-            if nav["prev"].collidepoint(lx, ly):
-                bg_page = (bg_page - 1) % pages
-                return
-            if nav["next"].collidepoint(lx, ly):
-                bg_page = (bg_page + 1) % pages
-                return
-        for value, r in choices:
-            if r.collidepoint(lx, ly):
-                if BACKGROUND_MODE == "solid":
+        # Both tile rows page together, so either row's arrows move bg_page.
+        pages = max(1, (len(images) + BG_TILES_PER_PAGE - 1) // BG_TILES_PER_PAGE)
+        for pager in (nav, night_nav):
+            if pager:
+                if pager["prev"].collidepoint(lx, ly):
+                    bg_page = (bg_page - 1) % pages
+                    return
+                if pager["next"].collidepoint(lx, ly):
+                    bg_page = (bg_page + 1) % pages
+                    return
+        # Solid colour swatches share the "choices" list.
+        if BACKGROUND_MODE == "solid":
+            for value, r in choices:
+                if r.collidepoint(lx, ly):
                     BACKGROUND_COLOR = BG_COLOR_BY_NAME[value]
-                else:
-                    # Show it at once (the render loop only re-derives this when
-                    # the current picture disappears), and restart the timer so
-                    # an explicit choice isn't cycled away a moment later.
-                    BACKGROUND_IMAGE = value
-                    bg_slide_name = value
-                    bg_slide_at = time.monotonic()
-                background_save()
-                return
-        if slide:
-            if slide["toggle"].collidepoint(lx, ly):
-                BACKGROUND_SLIDESHOW = not BACKGROUND_SLIDESHOW
-                bg_slide_at = time.monotonic()
-                background_save()
-                return
-            new = BACKGROUND_SLIDESHOW_S
-            step = BACKGROUND_SLIDESHOW_STEP_S
-            if slide["minus"].collidepoint(lx, ly):
-                new = max(BACKGROUND_SLIDESHOW_MIN_S,
-                          BACKGROUND_SLIDESHOW_S - step)
-            elif slide["plus"].collidepoint(lx, ly):
-                new = min(BACKGROUND_SLIDESHOW_MAX_S,
-                          BACKGROUND_SLIDESHOW_S + step)
-            if new != BACKGROUND_SLIDESHOW_S:
-                BACKGROUND_SLIDESHOW_S = new
-                background_save()
-                return
+                    background_save()
+                    return
+        else:
+            # Day row assigns the day slot, Night row the night slot. The render
+            # loop re-derives which one is on screen from the clock, so the pick
+            # shows at once when the chosen slot is the active one.
+            for value, r in choices:
+                if r.collidepoint(lx, ly):
+                    BACKGROUND_IMAGE_DAY = value
+                    if is_daytime():
+                        bg_slide_name = value
+                    background_save()
+                    return
+            for value, r in night_choices:
+                if r.collidepoint(lx, ly):
+                    BACKGROUND_IMAGE_NIGHT = value
+                    if not is_daytime():
+                        bg_slide_name = value
+                    background_save()
+                    return
         if dim:
             new = BACKGROUND_DIM
             if dim["minus"].collidepoint(lx, ly):
@@ -4192,7 +4204,17 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                 menu_screen = "main"
                 return
         elif menu_screen == "version":
-            update, back = _version_layout(w, h)
+            clock, update, back = _version_layout(w, h)
+            if clock.collidepoint(lx, ly):
+                # Flip the idle-clock format and persist it. Write then reload
+                # via apply_config (which owns the CLOCK_24H global), bumping
+                # last_cfg_mtime so the hot-reload watcher skips our own write.
+                new_val = not CLOCK_24H
+                write_config_values({"clock_24h": new_val})
+                apply_config()
+                last_cfg_mtime = _cfg_mtime()
+                print(f"[clock] format -> {'24h' if new_val else '12h AM/PM'}")
+                return
             if update.collidepoint(lx, ly):
                 if updater.busy:
                     return
@@ -4432,10 +4454,9 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                           f"bar={PROGRESS_BAR} dim={DIM_ENABLED} "
                           f"dots={INTRO_DOTS_MAX} fps={TARGET_FPS}")
 
-            # Which picture the backdrop shows. Settle on the configured one,
-            # then let the slideshow walk forward from there on its own timer.
-            # bg_slide_name is display-only state — the slideshow never writes
-            # BACKGROUND_IMAGE, so the user's pick survives it.
+            # Which picture the backdrop shows: the Day or Night slot, chosen by
+            # the Pi's local clock, so it switches itself at 6 AM / 6 PM. Recomputed
+            # every frame (cheap) so crossing the boundary flips the picture live.
             if BACKGROUND_MODE == "picture":
                 if now - bg_images_at >= 2.0:
                     # Re-scan on a slow timer, not every frame — it's a
@@ -4444,14 +4465,10 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                     # restart.
                     bg_images = list_background_images()
                     bg_images_at = now
-                if bg_slide_name not in bg_images:
-                    bg_slide_name = _active_background_image()
-                    bg_slide_at = now
-                if (BACKGROUND_SLIDESHOW and len(bg_images) > 1
-                        and now - bg_slide_at >= BACKGROUND_SLIDESHOW_S):
-                    nxt = (bg_images.index(bg_slide_name) + 1) % len(bg_images)
-                    bg_slide_name = bg_images[nxt]
-                    bg_slide_at = now
+                chosen = (BACKGROUND_IMAGE_DAY if is_daytime()
+                          else BACKGROUND_IMAGE_NIGHT)
+                bg_slide_name = (chosen if chosen in bg_images
+                                 else (bg_images[0] if bg_images else ""))
 
             screen.fill(BG)
 
@@ -4576,31 +4593,45 @@ async def render_loop(state: State, watcher: "AvrcpWatcher",
                                       CURRENT_BOLD, c_current, curr_pos, max_len,
                                       ROTATION_DEG, outline_color=o_current)
                     else:
-                        # Idle (no track at all): just the 24h HH:MM:SS clock,
-                        # grown to fill 3/4 of the screen, with the hour RED,
-                        # minute YELLOW, second GREEN (colons white). draw_clock
-                        # lays the digits on a fixed monospaced grid (so the time
-                        # never drifts as digits change) and centers by glyph ink
-                        # (equal top/bottom spacing). Size off that same grid width
-                        # — 6 max-width digit cells + 2 colon cells — measured at a
-                        # reference size, so the widest possible time fills ~3/4.
+                        # Idle (no track at all): the big clock, grown to fill
+                        # ~3/4 of the screen. 24-hour "HH:MM:SS" (hour RED, minute
+                        # YELLOW, second GREEN) or 12-hour "HH:MM AM/PM" (hour RED,
+                        # minute YELLOW, AM/PM GREEN), colons white. draw_clock lays
+                        # the digits on a monospaced grid (so the time never drifts
+                        # as digits change) and centers by glyph ink. Size off the
+                        # CURRENT format's own grid width so either one fills ~3/4.
                         now_local = time.localtime()
+                        # Each segment carries its dimmed fill and a uniform black
+                        # outline (dimmed to match) — one stroke colour across all
+                        # glyphs so the hour reads the same as the rest, not a
+                        # per-colour readable_text_on pick (which flips red white).
+                        clock_outline = scale_color((0, 0, 0), bf)
+                        def clock_seg(text, name):
+                            return (text, scale_color(COLOR_BY_NAME[name], bf),
+                                    clock_outline)
+                        if CLOCK_24H:
+                            segments = [
+                                clock_seg(time.strftime("%H", now_local), "red"),
+                                clock_seg(":", "white"),
+                                clock_seg(time.strftime("%M", now_local), "yellow"),
+                                clock_seg(":", "white"),
+                                clock_seg(time.strftime("%S", now_local), "green"),
+                            ]
+                        else:
+                            # 12-hour with no leading zero, e.g. "9:05 AM".
+                            hour12 = str(int(time.strftime("%I", now_local)))
+                            segments = [
+                                clock_seg(hour12, "red"),
+                                clock_seg(":", "white"),
+                                clock_seg(time.strftime("%M", now_local), "yellow"),
+                                clock_seg(" " + time.strftime("%p", now_local),
+                                          "green"),
+                            ]
                         ref = get_font(200, CURRENT_BOLD, CLOCK_FONT_PATH)
-                        grid_w = (max(ref.size(str(d))[0] for d in range(10)) * 6
-                                  + ref.size(":")[0] * 2)
+                        grid_w = max(1, clock_grid_width(
+                            ref, "".join(t for t, _c, _o in segments)))
                         clock_size = max(8, int(200 * min(w * 0.75 / grid_w,
                                                           h * 0.75 / ref.get_height())))
-                        colon = scale_color(COLOR_BY_NAME["white"], bf)
-                        segments = [
-                            (time.strftime("%H", now_local),
-                             scale_color(COLOR_BY_NAME["red"], bf)),
-                            (":", colon),
-                            (time.strftime("%M", now_local),
-                             scale_color(COLOR_BY_NAME["yellow"], bf)),
-                            (":", colon),
-                            (time.strftime("%S", now_local),
-                             scale_color(COLOR_BY_NAME["green"], bf)),
-                        ]
                         draw_clock(screen, segments, clock_size, CURRENT_BOLD,
                                    curr_pos, ROTATION_DEG, CLOCK_FONT_PATH)
 
