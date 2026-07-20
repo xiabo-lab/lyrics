@@ -12,6 +12,11 @@ Step-by-step setup for the car lyric display on a **Raspberry Pi 5** running the
 **No source-code changes are required**; the code is identical to the Pi Zero 2W
 build.
 
+> 📱 **Just want to use the display once it's running?** See the
+> **[First-Time Setup Guide](SETUP.md)** — a touchscreen walkthrough of every
+> on-screen menu (fonts, background, Bluetooth, Wi-Fi, clock format) plus
+> day-to-day use. This README covers the one-time Pi install below.
+
 > ⚠️ **Use the _Lite_ image, not "with desktop."** The desktop image auto-starts
 > its own Wayland compositor (`labwc` via `lightdm`), which grabs the HDMI output
 > and fights `cage`. You'll get an endless `Swapchain … failed test` and a black
