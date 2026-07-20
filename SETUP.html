@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>carlyrics — First-Time Setup Guide</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1c2126; --muted:#5b6672;
+    --line:#e3e7ec; --accent:#2f7d46; --accent-ink:#ffffff;
+    --chip:#eef1f4; --chip-ink:#33404d; --note:#fff8e6; --note-line:#e8d48a;
+    --tip:#eaf4ff; --tip-line:#b8d8f5; --code:#eef1f4;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1319; --card:#161b22; --ink:#e6eaef; --muted:#9aa6b2;
+      --line:#262d36; --accent:#3fa060; --accent-ink:#0b0f14;
+      --chip:#1f2731; --chip-ink:#c7d2dd; --note:#2a2413; --note-line:#5a4d1f;
+      --tip:#12212f; --tip-line:#204863; --code:#1d242d;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f7f9; --card:#ffffff; --ink:#1c2126; --muted:#5b6672;
+    --line:#e3e7ec; --accent:#2f7d46; --accent-ink:#ffffff;
+    --chip:#eef1f4; --chip-ink:#33404d; --note:#fff8e6; --note-line:#e8d48a;
+    --tip:#eaf4ff; --tip-line:#b8d8f5; --code:#eef1f4;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f1319; --card:#161b22; --ink:#e6eaef; --muted:#9aa6b2;
+    --line:#262d36; --accent:#3fa060; --accent-ink:#0b0f14;
+    --chip:#1f2731; --chip-ink:#c7d2dd; --note:#2a2413; --note-line:#5a4d1f;
+    --tip:#12212f; --tip-line:#204863; --code:#1d242d;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  .wrap{max-width:820px; margin:0 auto; padding:32px 20px 72px}
+  header.hero{
+    background:linear-gradient(135deg,#1f2937,#0b1220);
+    color:#fff; border-radius:18px; padding:34px 28px; margin-bottom:28px;
+    box-shadow:0 8px 30px rgba(0,0,0,.18);
+  }
+  header.hero h1{margin:0 0 6px; font-size:1.9rem; letter-spacing:.2px}
+  header.hero p{margin:0; color:#c8d2dd; font-size:1.02rem}
+  h2{
+    margin:38px 0 12px; font-size:1.35rem; padding-bottom:8px;
+    border-bottom:2px solid var(--line);
+  }
+  h3{margin:22px 0 8px; font-size:1.08rem}
+  p{margin:10px 0}
+  a{color:var(--accent)}
+  section.card{
+    background:var(--card); border:1px solid var(--line); border-radius:14px;
+    padding:6px 22px 20px; margin:18px 0;
+  }
+  .step-num{
+    display:inline-flex; align-items:center; justify-content:center;
+    width:30px; height:30px; border-radius:50%;
+    background:var(--accent); color:var(--accent-ink);
+    font-weight:700; font-size:.95rem; margin-right:10px; flex:0 0 auto;
+  }
+  .step-head{display:flex; align-items:center; margin-top:14px}
+  .step-head h2{border:0; margin:0; padding:0; font-size:1.3rem}
+  ul,ol{padding-left:22px} li{margin:6px 0}
+  code,kbd{
+    background:var(--code); border-radius:6px; padding:1px 6px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.9em;
+  }
+  kbd{border:1px solid var(--line)}
+  .tablewrap{overflow-x:auto; margin:14px 0}
+  table{border-collapse:collapse; width:100%; min-width:440px; font-size:.96rem}
+  th,td{border:1px solid var(--line); padding:9px 12px; text-align:left; vertical-align:top}
+  th{background:var(--chip); color:var(--chip-ink); font-weight:600}
+  .callout{
+    border-radius:10px; padding:12px 16px; margin:16px 0;
+    border-left:4px solid var(--note-line); background:var(--note);
+  }
+  .callout.tip{border-left-color:var(--tip-line); background:var(--tip)}
+  .callout p{margin:6px 0}
+  .callout .k{font-weight:700}
+  .pill{
+    display:inline-block; background:var(--chip); color:var(--chip-ink);
+    border-radius:999px; padding:2px 10px; font-size:.82rem; font-weight:600;
+    margin:2px 4px 2px 0;
+  }
+  .green{color:var(--accent); font-weight:700}
+  .menu-list{counter-reset:m; list-style:none; padding-left:0}
+  .menu-list li{
+    padding:8px 12px; border:1px solid var(--line); border-radius:10px;
+    background:var(--card); margin:6px 0; font-weight:600;
+  }
+  .menu-list li.close{border-color:var(--accent); color:var(--accent)}
+  footer{margin-top:40px; color:var(--muted); font-size:.9rem; text-align:center}
+  hr{border:0; border-top:1px solid var(--line); margin:30px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <h1>carlyrics — First-Time Setup Guide</h1>
+  <p>Set up your car lyric display in a few simple steps. Everything is done on
+  the touchscreen — no keyboard, mouse, or computer needed.</p>
+</header>
+
+<section class="card">
+  <h2 style="border:0;margin-top:14px">Before you start</h2>
+  <ul>
+    <li><span class="k">It turns on by itself.</span> When the Pi gets power, the
+      app launches automatically. For the first few seconds you'll see a short
+      <strong>road-safety notice</strong> — please only operate the settings while parked.</li>
+    <li><span class="k">When no music is playing</span>, the screen shows a large <strong>clock</strong>.</li>
+    <li><span class="k">When music plays</span> on your phone (works best with
+      <strong>YouTube Music</strong>), the lyrics appear automatically and scroll in time with the song.</li>
+  </ul>
+
+  <h3>Opening the Settings menu</h3>
+  <div class="callout tip">
+    <p><span class="k">Press and hold one finger still on the screen for about 5 seconds.</span></p>
+  </div>
+  <p>The <strong>Settings</strong> menu appears with these buttons, top to bottom.
+  Tap any item to open it; each screen has a <strong>Back</strong> button to return here.</p>
+  <ol class="menu-list">
+    <li>Font Settings</li>
+    <li>Background Picture</li>
+    <li>Bluetooth</li>
+    <li>Other Settings</li>
+    <li>Network</li>
+    <li>Software Version</li>
+    <li class="close">Close — returns you to the lyrics / clock</li>
+  </ol>
+
+  <div class="callout">
+    <p>🚀 <span class="k">Quick start — do these two first:</span></p>
+    <p>1. <strong>Bluetooth</strong> → pair your phone (Step&nbsp;3), so the display can see your music.<br>
+       2. <strong>Network</strong> → join your Wi-Fi (Step&nbsp;5), so it can look up lyrics online.</p>
+    <p>Everything else below is about making it look and feel the way you like.</p>
+  </div>
+</section>
+
+<div class="step-head"><span class="step-num">1</span><h2>Font Settings</h2></div>
+<section class="card">
+  <p>Set the <strong>size, color, and boldness</strong> of the on-screen text.
+  There are four rows, top to bottom:</p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Row</th><th>What it controls</th></tr>
+    <tr><td><strong>Karaoke fill (sung words)</strong></td><td>The color that "fills in" each word as it's sung. Color only — it uses the Current line's size/boldness.</td></tr>
+    <tr><td><strong>Top line</strong></td><td>The <em>previous</em> lyric line (context above the current one).</td></tr>
+    <tr><td><strong>Current line</strong></td><td>The line being sung right now — the biggest, most important line.</td></tr>
+    <tr><td><strong>Bottom line</strong></td><td>The <em>next</em> lyric line (context below).</td></tr>
+  </table>
+  </div>
+  <p>For each of the three "line" rows you can set:</p>
+  <ul>
+    <li><span class="k">Size</span> — drag the slider (about 20–160&nbsp;px). The label shows the live size, e.g. <em>"Current line — 56px"</em>.</li>
+    <li><span class="k">Color</span> — tap one of the 8 swatches:
+      <span class="pill">Yellow</span><span class="pill">Green</span><span class="pill">White</span><span class="pill">Red</span><span class="pill">Blue</span><span class="pill">Purple</span><span class="pill">Black</span><span class="pill">Brown</span>
+      The selected one gets a white outline. (Black and Brown are for light backgrounds.)</li>
+    <li><span class="k">Bold / Normal</span> — the big button on the right toggles the weight.</li>
+  </ul>
+  <div class="callout tip">
+    <p><span class="k">Tips:</span> Changes <strong>preview live</strong>. Tap
+    <span class="green">Done</span> to save — settings survive a restart. A good
+    starting point: make the <strong>Current line</strong> large and bold, with the
+    Top and Bottom lines smaller.</p>
+  </div>
+</section>
+
+<div class="step-head"><span class="step-num">2</span><h2>Background Picture</h2></div>
+<section class="card">
+  <p>Choose what's shown <em>behind</em> the lyrics and clock. (Menus always stay
+  on a plain dark background so controls remain readable.) Pick a <strong>mode</strong> at the top:</p>
+
+  <h3>Solid Colour</h3>
+  <p>Tap a color:
+    <span class="pill">Black</span><span class="pill">White</span><span class="pill">Grey</span><span class="pill">Light Brown</span><span class="pill">Sky Blue</span>
+    Simple and always readable — a good default.</p>
+
+  <h3>Picture</h3>
+  <p>Show a photo behind the text. The display can switch pictures automatically by time of day:</p>
+  <ul>
+    <li><span class="k">Day</span> row — shown from <strong>6:00&nbsp;AM to 5:59&nbsp;PM</strong></li>
+    <li><span class="k">Night</span> row — shown from <strong>6:00&nbsp;PM to 5:59&nbsp;AM</strong></li>
+  </ul>
+  <p>Each row shows a strip of thumbnails (use the <strong>‹ ›</strong> arrows to page
+  through more). <strong>Tap a thumbnail in the Day row</strong> to set your daytime
+  picture, and one in the <strong>Night row</strong> for nighttime. The active row is
+  tagged <strong>"(now)"</strong>, and your pick in each row gets a white box around it.</p>
+  <div class="callout tip">
+    <p>The display switches between your Day and Night pictures on its own at 6&nbsp;AM and 6&nbsp;PM — you don't have to do anything.</p>
+  </div>
+  <p><span class="k">Dim picture</span> — a <strong>±</strong> stepper (0–60%) that
+  darkens the picture <em>only</em> (not the text), so lyrics stay readable over a bright or busy photo.</p>
+  <p><span class="k">Adding your own pictures:</span> drop image files into the
+  <code>Wallpaper/</code> folder on the Pi. They look best at the screen's own
+  resolution; other sizes are scaled to fill and center-cropped. Your images are
+  never overwritten by a firmware update.</p>
+  <p>Changes here <strong>save immediately</strong> — just tap <strong>Back</strong> when done.</p>
+</section>
+
+<div class="step-head"><span class="step-num">3</span><h2>Bluetooth — connect your phone</h2></div>
+<section class="card">
+  <p>This is how the display learns which phone to read the music from.</p>
+  <ol>
+    <li>Tap <strong>Pair New Phone</strong>. The button turns amber and the Pi becomes <em>discoverable</em> for a short while.</li>
+    <li>On <strong>your phone</strong>, open <strong>Settings → Bluetooth</strong> and tap the display's name in the device list. (Its name is shown on the <strong>Software Version</strong> screen, next to <em>"Bluetooth name"</em>.)</li>
+    <li>Accept the pairing request if your phone asks.</li>
+    <li>Once paired, the phone appears in the list here. A <strong>"• connected"</strong> tag shows when it's actively linked.</li>
+  </ol>
+  <div class="callout">
+    <p><span class="k">Notes:</span> After the first pairing, the display
+    <strong>reconnects automatically</strong> whenever your phone is nearby and unlocked
+    — you normally never touch this screen again. If your phone is locked, iOS may
+    refuse the connection; it links up once you unlock/use the phone. To remove a
+    phone, tap its <strong>Forget</strong> button.</p>
+  </div>
+</section>
+
+<div class="step-head"><span class="step-num">4</span><h2>Other Settings</h2></div>
+<section class="card">
+  <p>Four adjustments for how the display behaves:</p>
+  <div class="tablewrap">
+  <table>
+    <tr><th>Setting</th><th>What it does</th></tr>
+    <tr><td><strong>Rotate Screen 180°</strong> <span class="pill">Yes/No</span></td><td>Flip everything upside-down — use this if the screen is mounted the other way up.</td></tr>
+    <tr><td><strong>Bluetooth A2DP Offset</strong> <span class="pill">0.0s–3.0s</span></td><td>Compensates for audio delay over Bluetooth. If lyrics run <strong>ahead</strong> of the sound, increase this. (Steps of 0.1s.)</td></tr>
+    <tr><td><strong>Lyrics Timing Offset</strong> <span class="pill">−3.0s to +3.0s</span></td><td>Fine nudge for lyric timing. <strong>Negative</strong> = show lyrics earlier; <strong>positive</strong> = later. (Steps of 0.5s.)</td></tr>
+    <tr><td><strong>Auto Dim</strong> <span class="pill">Yes/No</span></td><td>Automatically dims the whole display at night so it isn't glaring while driving.</td></tr>
+  </table>
+  </div>
+  <p>Use the <strong>±</strong> buttons for the sliders and the <strong>Yes/No</strong> button for toggles. Everything saves immediately; tap <strong>Back</strong> when done.</p>
+  <div class="callout tip">
+    <p><span class="k">Tip:</span> If lyrics feel slightly out of sync, first try
+    <strong>Lyrics Timing Offset</strong> in small steps. Use <strong>Bluetooth A2DP
+    Offset</strong> only if there's a consistent gap between what you <em>hear</em> and what you <em>see</em>.</p>
+  </div>
+</section>
+
+<div class="step-head"><span class="step-num">5</span><h2>Network — join Wi-Fi</h2></div>
+<section class="card">
+  <p>The display needs the internet to look up lyrics. This screen shows:</p>
+  <ul>
+    <li><span class="k">Wi-Fi:</span> the network you're connected to (or <em>"Not connected"</em>)</li>
+    <li><span class="k">IP address</span></li>
+    <li><span class="k">Internet:</span> <span class="green">Online</span> / <span style="color:#c94a4a;font-weight:700">Offline</span> / <span style="color:#c9a13a;font-weight:700">Checking…</span></li>
+  </ul>
+  <p>To connect:</p>
+  <ol>
+    <li>Tap <strong>Wi-Fi Setup</strong>.</li>
+    <li>Pick your Wi-Fi network from the list.</li>
+    <li>Enter the password using the <strong>on-screen keyboard</strong>.</li>
+    <li>Confirm — the display joins the network and remembers it for next time.</li>
+  </ol>
+  <p>Tap <strong>Check now</strong> any time to re-test whether it's online, then <strong>Back</strong> when done.</p>
+  <div class="callout tip">
+    <p>If you see <span class="green">Online</span>, you're all set — lyrics are fetched automatically.</p>
+  </div>
+</section>
+
+<div class="step-head"><span class="step-num">6</span><h2>Software Version — clock format &amp; updates</h2></div>
+<section class="card">
+  <p>Shows the app <strong>version</strong> and the display's <strong>Bluetooth name</strong>, and has two buttons.</p>
+  <h3>Clock format</h3>
+  <p>Tap the <strong>Clock</strong> button to switch the idle-screen clock between:</p>
+  <ul>
+    <li><span class="k">24-hour</span> — <code>13:05:07</code> (<code>HH:MM:SS</code>)</li>
+    <li><span class="k">12-hour</span> — <code>1:05 PM</code> (<code>HH:MM AM/PM</code>)</li>
+  </ul>
+  <p>It toggles each time you tap and is remembered after a restart.</p>
+  <h3>Update Firmware</h3>
+  <p>Pulls the latest version of the app from the internet and restarts.</p>
+  <ol>
+    <li>Tap <strong>Update Firmware</strong> — it arms and asks you to confirm.</li>
+    <li>Tap <strong>again</strong> to confirm. The display downloads the update and restarts on its own.</li>
+  </ol>
+  <div class="callout">
+    <p>Make sure you're <span class="green">Online</span> (Step 5) before updating.</p>
+  </div>
+</section>
+
+<hr>
+
+<h2>Day-to-day use</h2>
+<section class="card">
+  <ul>
+    <li><span class="k">Play music on your phone</span> (YouTube Music recommended) — lyrics appear and follow the song automatically. No music → the big <strong>clock</strong> is shown.</li>
+    <li><span class="k">If the lyrics for a song look wrong or are missing</span>, on-screen feedback buttons let you fix it:
+      <ul>
+        <li><span class="green">Green</span> — confirm the current lyrics are correct (saves them for next time).</li>
+        <li><span style="color:#c94a4a;font-weight:700">Red</span> — open a picker to choose a different match or <strong>search manually</strong> (on-screen keyboard, including pinyin for Chinese titles).</li>
+        <li><span class="k">Triple-tap</span> — remove the saved lyric for the current song so it's looked up fresh.</li>
+      </ul>
+    </li>
+    <li><span class="k">To change any setting later</span>, just hold a finger on the screen for ~5 seconds to reopen the menu.</li>
+  </ul>
+</section>
+
+<h2>Troubleshooting quick reference</h2>
+<section class="card">
+  <div class="tablewrap">
+  <table>
+    <tr><th>Problem</th><th>Try this</th></tr>
+    <tr><td>No lyrics, only the clock</td><td>Make sure music is <strong>playing</strong> and the phone is <strong>connected</strong> (Step 3).</td></tr>
+    <tr><td>"Offline" / no lyrics found</td><td>Rejoin <strong>Wi-Fi</strong> (Step 5), then tap <strong>Check now</strong>.</td></tr>
+    <tr><td>Lyrics slightly out of sync</td><td>Adjust <strong>Lyrics Timing Offset</strong> (Step 4) in small steps.</td></tr>
+    <tr><td>Screen is upside-down</td><td>Turn on <strong>Rotate Screen 180°</strong> (Step 4).</td></tr>
+    <tr><td>Text hard to read on a photo</td><td>Increase <strong>Dim picture</strong> (Step 2) or pick a <strong>Solid Colour</strong> background.</td></tr>
+    <tr><td>Phone won't reconnect</td><td>Unlock the phone; if needed, <strong>Forget</strong> and <strong>Pair</strong> again (Step 3).</td></tr>
+  </table>
+  </div>
+</section>
+
+<footer>
+  Enjoy your carlyrics display — and please only adjust settings while parked.
+</footer>
+
+</div>
+</body>
+</html>
