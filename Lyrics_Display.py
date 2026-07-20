@@ -68,7 +68,7 @@ OM_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 # Shown on the Software Version screen (Settings → Software Version). Bump on
 # release so the car display can be matched to a known build at a glance.
-APP_VERSION = "1.13.0"
+APP_VERSION = "1.13.1"
 
 # ---- Firmware update (Settings → Software Version → Update Firmware) --------
 # "Update Firmware" downloads the latest code straight from GitHub so a user
@@ -3438,10 +3438,10 @@ def draw_background(screen, w, h, page: int) -> None:
 # drawn in the CURRENT line's font/size/bold — only its colour is its own — so
 # offering it a size or weight of its own would be a lie.
 SETTINGS_ROWS = (
+    ("karaoke", "Karaoke fill (sung words)", False),
     ("top", "Top line", True),
     ("current", "Current line", True),
     ("bottom", "Bottom line", True),
-    ("karaoke", "Karaoke fill (sung words)", False),
 )
 
 
@@ -3475,8 +3475,11 @@ def _settings_layout(w: int, h: int):
         # Screen too short for the per-row floor — honouring it would push Done
         # off the bottom edge, so drop the floor and split strictly by weight.
         row_heights = [int(avail * wgt / sum(weights)) for wgt in weights]
-    # Swatch size keys off a FULL row, so every row's palette matches.
-    sec_h = row_heights[0]
+    # Swatch size keys off a FULL (sized) row, so every row's palette matches —
+    # the first row may now be the shorter colour-only Karaoke row, so pick the
+    # first sized row's height rather than row 0.
+    sec_h = next((rh for (_k, _l, sized), rh in zip(SETTINGS_ROWS, row_heights)
+                  if sized), row_heights[0])
 
     # Each section is split horizontally: the LEFT 3/5 holds the size slider +
     # colour swatches, the RIGHT 2/5 is a big Bold/Normal button. Keeping them
